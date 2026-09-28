@@ -1044,3 +1044,28 @@ found the same overflow independently, checks every result is in
 widening to `U512`, which is exact but adds a type for a case the clamp
 already settles; and lowering the test network's limit, which changes its
 genesis and every existing test chain.
+
+## 2026-09-28: Per-connection version nonces; never redial ourselves
+
+A seed node finds its own name in the seed list, dialed itself every five
+seconds, detected the self-connection, and logged the disconnect each time.
+Two changes stop that.
+
+Before a direct dial, the node resolves the name itself and drops any
+address equal to its bound listen address, or loopback on its port when it
+listens on an unspecified address. A name that resolves only to us is not
+dialed at all. Names reached through a proxy are resolved by the proxy and
+skip this check.
+
+Other routes back to us (a public address in front of an unspecified
+listener, NAT, a proxy) still connect once. The version nonce was
+node-wide, and the inbound half detected the match and closed, so the
+outbound half could not tell its dial had been ourselves. Each connection
+now uses its own random nonce. The node remembers its outbound nonces until
+their handshakes finish, and an inbound version carrying one names exactly
+which dial came back. That target, and its address, are then never dialed
+again, with one log line. This is also a privacy fix: a node-wide nonce let
+anyone seeing two of a node's connections, say one over Tor and one over
+clearnet, link them. Alternative considered: marking any outbound peer still
+handshaking when an inbound self-connection appears, which can blame the
+wrong seed when several dials are in flight and would then never retry it.

@@ -14,6 +14,9 @@ pub const PING_INTERVAL: u64 = 60;
 pub const PING_TIMEOUT: u64 = 120;
 /// Inventory items remembered per peer, to avoid re-announcing.
 pub const KNOWN_INVENTORY_CAP: usize = 50_000;
+/// Disconnect reason when the remote side is this node: its version
+/// carries our own nonce.
+pub const SELF_CONNECTION: &str = "connected to self";
 
 /// Who opened the connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,7 +165,7 @@ impl Peer {
         }
         if theirs.nonce == self.ours.nonce {
             return vec![Event::Disconnect {
-                reason: "connected to self",
+                reason: SELF_CONNECTION,
                 ban: false,
             }];
         }
@@ -288,7 +291,7 @@ mod tests {
         assert_eq!(
             inb.handle(&Message::Version(info(2)), 1),
             vec![Event::Disconnect {
-                reason: "connected to self",
+                reason: SELF_CONNECTION,
                 ban: false
             }]
         );

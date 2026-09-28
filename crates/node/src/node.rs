@@ -14,7 +14,7 @@ use null_circuit::proof::VerifyingKey;
 use null_p2p::addrbook::AddressBook;
 use null_p2p::dandelion::{Dandelion, Route};
 use null_p2p::message::{CompactBlock, Inventory, Message, PeerAddr, VersionInfo, MAX_HEADERS};
-use null_p2p::peer::{version_info, Direction, Event as PeerEvent, Peer};
+use null_p2p::peer::{version_info, Direction, Event as PeerEvent, Peer, SELF_CONNECTION};
 use null_p2p::sync::{locator, BlockSync};
 use null_protocol::block::{Block, BlockHash, BlockHeader};
 use null_protocol::compact::CompactBlock as LightBlock;
@@ -78,6 +78,13 @@ pub enum Event {
     Disconnected {
         /// Connection id.
         id: PeerId,
+    },
+    /// A dial was skipped because its name resolves only to this node.
+    DialedSelf {
+        /// Connection id.
+        id: PeerId,
+        /// What was dialed.
+        target: String,
     },
     /// A dial or handshake failed.
     DialFailed {
@@ -282,6 +289,16 @@ struct PendingBlock {
     received_at: u64,
 }
 
+/// Endpoints found to be this node: seed names listing it, or addresses
+/// gossiped back to it.
+#[derive(Default)]
+struct OwnEndpoints {
+    /// Dial targets (`host:port`) that reached this node.
+    targets: HashSet<String>,
+    /// Address-book keys that reached this node.
+    addrs: HashSet<([u8; 16], u16)>,
+}
+
 /// The node state, owned by the loop task.
 pub struct Node {
     params: ChainParams,
@@ -294,12 +311,19 @@ pub struct Node {
     peers: HashMap<PeerId, PeerHandle>,
     dialing: HashMap<PeerId, String>,
     configured: Vec<String>,
+    /// Our bound listen address, never dialed.
+    listen_addr: Option<SocketAddr>,
+    /// Targets and addresses that turned out to be this node; never redialed.
+    own: OwnEndpoints,
     proxy: Option<SocketAddr>,
     i2p: Option<Arc<SamSession>>,
     max_inbound: usize,
     pending_blocks: HashMap<BlockHash, PendingBlock>,
     next_id: PeerId,
-    nonce: u64,
+    /// Version nonces of our outbound connections still handshaking. Each
+    /// connection gets its own, so peers cannot link our connections by it,
+    /// and an inbound version carrying one is our own dial come back.
+    handshakes: HashMap<u64, PeerId>,
     rng: StdRng,
     events: mpsc::Sender<Event>,
     genesis: BlockHash,
@@ -406,7 +430,7 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         }
     });
 
-    let mut rng = StdRng::from_entropy();
+    let rng = StdRng::from_entropy();
     let node = Node {
         params,
         chain,
@@ -418,12 +442,14 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         peers: HashMap::new(),
         dialing: HashMap::new(),
         configured: config.connect.clone(),
+        listen_addr,
+        own: OwnEndpoints::default(),
         proxy: config.proxy,
         i2p,
         max_inbound: config.max_inbound,
         pending_blocks: HashMap::new(),
         next_id: 1,
-        nonce: rng.next_u64(),
+        handshakes: HashMap::new(),
         rng,
         events: events.clone(),
         genesis,
@@ -555,6 +581,11 @@ impl Node {
                 self.remove_peer(id);
                 Ok(())
             }
+            Event::DialedSelf { id, target } => {
+                self.dialing.remove(&id);
+                self.mark_own(target, None);
+                Ok(())
+            }
             Event::DialFailed { id, target } => {
                 self.dialing.remove(&id);
                 if let Ok(addr) = target.parse::<SocketAddr>() {
@@ -587,9 +618,9 @@ impl Node {
         }
     }
 
-    fn our_version(&self) -> Result<VersionInfo> {
+    fn our_version(&self, nonce: u64) -> Result<VersionInfo> {
         Ok(version_info(
-            self.nonce,
+            nonce,
             self.chain.tip()?.height,
             self.genesis,
             now(),
@@ -615,7 +646,11 @@ impl Node {
                 return Ok(());
             }
         }
-        let (peer, events) = Peer::new(direction, self.our_version()?, now());
+        let nonce = self.rng.next_u64();
+        if direction == Direction::Outbound {
+            self.handshakes.insert(nonce, id);
+        }
+        let (peer, events) = Peer::new(direction, self.our_version(nonce)?, now());
         self.peers.insert(
             id,
             PeerHandle {
@@ -631,6 +666,7 @@ impl Node {
 
     fn remove_peer(&mut self, id: PeerId) {
         self.peers.remove(&id);
+        self.handshakes.retain(|_, peer| *peer != id);
         self.dandelion.remove_peer(&id);
         if self.sync_peer == Some(id) {
             self.sync_peer = None;
@@ -654,6 +690,10 @@ impl Node {
                 PeerEvent::Send(message) => self.send(id, message),
                 PeerEvent::Ready(info) => self.on_ready(id, &info),
                 PeerEvent::Disconnect { reason, ban } => {
+                    if reason == SELF_CONNECTION {
+                        self.forget_self_peer(id);
+                        continue;
+                    }
                     log(&format!("peer {id}: disconnect ({reason})"));
                     if ban {
                         self.ban(id);
@@ -681,6 +721,7 @@ impl Node {
     }
 
     fn on_ready(&mut self, id: PeerId, info: &VersionInfo) {
+        self.handshakes.retain(|_, peer| *peer != id);
         let Some(handle) = self.peers.get_mut(&id) else {
             return;
         };
@@ -715,6 +756,14 @@ impl Node {
     }
 
     fn on_message(&mut self, id: PeerId, message: Message) -> Result<()> {
+        if let Message::Version(theirs) = &message {
+            if let Some(dialed) = self.own_dial(id, theirs.nonce) {
+                // Both ends are us: remember the dial, close both halves.
+                self.forget_self_peer(dialed);
+                self.remove_peer(id);
+                return Ok(());
+            }
+        }
         let Some(handle) = self.peers.get_mut(&id) else {
             return Ok(());
         };
@@ -1343,18 +1392,64 @@ impl Node {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         self.dialing.insert(id, target.clone());
-        crate::net::dial(
+        let route = crate::net::Route {
             target,
-            self.proxy,
-            self.i2p.clone(),
-            id,
-            self.events.clone(),
-        );
+            proxy: self.proxy,
+            i2p: self.i2p.clone(),
+            own: self.listen_addr,
+        };
+        crate::net::dial(route, id, self.events.clone());
+    }
+
+    /// Configured peers, without any that turned out to be this node.
+    fn dialable_configured(&self) -> Vec<String> {
+        self.configured
+            .iter()
+            .filter(|t| !self.own.targets.contains(*t))
+            .cloned()
+            .collect()
     }
 
     fn dial_configured(&mut self) {
-        for target in self.configured.clone() {
+        for target in self.dialable_configured() {
             self.dial(target);
+        }
+    }
+
+    /// The outbound connection whose handshake nonce an inbound peer `id`
+    /// presented, if any: that inbound connection is our own dial.
+    fn own_dial(&self, id: PeerId, nonce: u64) -> Option<PeerId> {
+        let inbound = self
+            .peers
+            .get(&id)
+            .is_some_and(|h| h.peer.direction() == Direction::Inbound);
+        inbound
+            .then(|| self.handshakes.get(&nonce).copied())
+            .flatten()
+    }
+
+    /// Drops a connection to ourselves. Its outbound side remembers what
+    /// was dialed so it is not dialed again; the inbound side just closes.
+    fn forget_self_peer(&mut self, id: PeerId) {
+        if let Some(handle) = self.peers.get(&id) {
+            if handle.peer.direction() == Direction::Outbound {
+                let (target, addr) = (handle.target.clone(), handle.addr);
+                let reached_directly = self.proxy.is_none() && self.i2p.is_none();
+                self.mark_own(target, reached_directly.then_some(addr));
+            }
+        }
+        self.remove_peer(id);
+    }
+
+    /// Records a target, and the address it reached when known, as this
+    /// node. Logs only the first time, so seeds listing themselves stay quiet.
+    fn mark_own(&mut self, target: String, addr: Option<SocketAddr>) {
+        if let Some(addr) = addr {
+            self.own.addrs.insert(addr_key(addr));
+        }
+        if !self.own.targets.contains(&target) {
+            log(&format!("not dialing {target} again: it is this node"));
+            self.own.targets.insert(target);
         }
     }
 
@@ -1373,11 +1468,21 @@ impl Node {
             .map(|h| h.target.clone())
             .chain(self.dialing.values().cloned())
             .collect();
-        if let Some(target) = self.configured.iter().find(|t| !busy.contains(*t)).cloned() {
+        if let Some(target) = self
+            .dialable_configured()
+            .into_iter()
+            .find(|t| !busy.contains(t))
+        {
             self.dial(target);
             return;
         }
-        let exclude: Vec<([u8; 16], u16)> = self.peers.values().map(|h| addr_key(h.addr)).collect();
+        let exclude: Vec<([u8; 16], u16)> = self
+            .peers
+            .values()
+            .map(|h| addr_key(h.addr))
+            .chain(self.own.addrs.iter().copied())
+            .chain(self.listen_addr.map(addr_key))
+            .collect();
         if let Some(candidate) = self.book.candidate(&exclude, now(), &mut self.rng) {
             let target = key_target(candidate.key());
             if !busy.contains(&target) {
@@ -1534,6 +1639,8 @@ fn shell(command: &str) -> std::process::Command {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use null_chain::params::Upgrade;
     use null_protocol::consensus::BranchId;
 
@@ -1598,5 +1705,54 @@ mod tests {
             assert_eq!(args, ["-c", "echo %s"]);
         }
         assert!(shell("exit 0").status().unwrap().success());
+    }
+
+    /// A TCP relay that forwards to `target` once it is set and counts the
+    /// connections it accepts: a NAT or public address leading back to us.
+    async fn counting_relay(
+        target: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+        accepted: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let target = target.clone();
+                tokio::spawn(async move {
+                    let to = loop {
+                        if let Some(to) = *target.lock().unwrap() {
+                            break to;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    };
+                    if let Ok(mut outbound) = tokio::net::TcpStream::connect(to).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    // Three maintenance rounds (every 5 ticks) would each redial a
+    // configured peer; a target found to be ourselves is dialed once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_target_that_reaches_ourselves_is_dialed_only_once() {
+        let target = Arc::new(std::sync::Mutex::new(None));
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let relay = counting_relay(target.clone(), accepted.clone()).await;
+        let node = spawn(Config {
+            listen: Some("127.0.0.1:0".parse().unwrap()),
+            connect: vec![relay.to_string()],
+            ..Config::test()
+        })
+        .await
+        .unwrap();
+        *target.lock().unwrap() = node.listen_addr;
+        tokio::time::sleep(Duration::from_secs(16)).await;
+        let dials = accepted.load(std::sync::atomic::Ordering::SeqCst);
+        node.shutdown().await;
+        assert_eq!(dials, 1, "the relay back to ourselves was redialed");
     }
 }

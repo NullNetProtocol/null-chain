@@ -101,22 +101,43 @@ struct Accepted {
     handshake_timeout: Duration,
 }
 
-/// Dials `target` (`host:port`) and runs the connection: `.i2p` peers
-/// through the SAM session, everything else through `proxy` or directly.
-pub fn dial(
-    target: String,
-    proxy: Option<SocketAddr>,
-    i2p: Option<Arc<SamSession>>,
-    id: PeerId,
-    events: mpsc::Sender<Event>,
-) -> JoinHandle<()> {
+/// Where a dial goes and how it gets there.
+pub struct Route {
+    /// `host:port` to reach.
+    pub target: String,
+    /// SOCKS5 proxy for everything but `.i2p` peers.
+    pub proxy: Option<SocketAddr>,
+    /// SAM session for `.i2p` peers.
+    pub i2p: Option<Arc<SamSession>>,
+    /// This node's listen address, never dialed when a name resolves to it.
+    pub own: Option<SocketAddr>,
+}
+
+/// Dials `route.target` and runs the connection: `.i2p` peers through the
+/// SAM session, everything else through the proxy or directly. A direct
+/// dial whose name resolves only to this node's own listener reports
+/// [`Event::DialedSelf`] instead of connecting.
+pub fn dial(route: Route, id: PeerId, events: mpsc::Sender<Event>) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let Route {
+            target,
+            proxy,
+            i2p,
+            own,
+        } = route;
         let stream = match (i2p, proxy) {
             (Some(session), _) if i2p::is_i2p(&target) => {
                 session.connect(i2p::destination_of(&target)).await
             }
             (_, Some(proxy)) => socks5_connect(proxy, &target).await,
-            _ => TcpStream::connect(&target).await.map_err(Error::from),
+            _ => match connect_direct(&target, own).await {
+                Ok(Some(stream)) => Ok(stream),
+                Ok(None) => {
+                    let _ = events.send(Event::DialedSelf { id, target }).await;
+                    return;
+                }
+                Err(error) => Err(error),
+            },
         };
         match stream {
             Ok(stream) => {
@@ -143,6 +164,35 @@ pub fn dial(
             }
         }
     })
+}
+
+/// Resolves `target` and connects to the first of its addresses that is not
+/// this node's listener, or returns `None` when every address is ours: a
+/// seed node finding its own name in the seed list.
+async fn connect_direct(target: &str, own: Option<SocketAddr>) -> Result<Option<TcpStream>> {
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(target).await?.collect();
+    let others = not_own(&resolved, own);
+    if others.is_empty() && !resolved.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(TcpStream::connect(others.as_slice()).await?))
+}
+
+/// The addresses in `resolved` that are not this node's listener `own`. A
+/// listener on an unspecified address (`0.0.0.0`) is also reachable over
+/// loopback on its port; its other interface addresses are unknown here and
+/// are caught by the handshake's self-connection check instead.
+pub fn not_own(resolved: &[SocketAddr], own: Option<SocketAddr>) -> Vec<SocketAddr> {
+    resolved
+        .iter()
+        .copied()
+        .filter(|addr| !own.is_some_and(|own| is_own(*addr, own)))
+        .collect()
+}
+
+fn is_own(addr: SocketAddr, own: SocketAddr) -> bool {
+    addr == own
+        || (own.ip().is_unspecified() && addr.port() == own.port() && addr.ip().is_loopback())
 }
 
 /// Opens a TCP connection to `target` through a SOCKS5 proxy without
@@ -351,5 +401,73 @@ mod tests {
             stream.write_all(&[5, 0xff]).await.unwrap();
         });
         assert!(socks5_connect(proxy, "host:1").await.is_err());
+    }
+
+    fn addr(text: &str) -> SocketAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn only_our_exact_listener_is_filtered() {
+        let resolved = [addr("46.19.141.66:19000"), addr("46.19.141.67:19000")];
+        assert_eq!(
+            not_own(&resolved, Some(addr("46.19.141.66:19000"))),
+            [addr("46.19.141.67:19000")]
+        );
+        assert_eq!(not_own(&resolved, None), resolved);
+        assert_eq!(
+            not_own(&resolved, Some(addr("46.19.141.66:19001"))),
+            resolved,
+            "another port on our host is another node"
+        );
+    }
+
+    #[test]
+    fn an_unspecified_listener_is_also_our_loopback_on_its_port() {
+        let own = Some(addr("0.0.0.0:19000"));
+        let resolved = [
+            addr("127.0.0.1:19000"),
+            addr("127.0.0.1:19001"),
+            addr("46.19.141.66:19000"),
+        ];
+        assert_eq!(
+            not_own(&resolved, own),
+            [addr("127.0.0.1:19001"), addr("46.19.141.66:19000")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_resolving_only_to_ourselves_is_not_dialed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let own = listener.local_addr().unwrap();
+        let skipped = connect_direct(&own.to_string(), Some(own)).await.unwrap();
+        assert!(skipped.is_none());
+        // Nothing connected: accepting would wait forever.
+        let accept = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(accept.is_err());
+
+        let other = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dialed = connect_direct(&other.local_addr().unwrap().to_string(), Some(own))
+            .await
+            .unwrap();
+        assert!(dialed.is_some());
+    }
+
+    #[tokio::test]
+    async fn dialing_ourselves_reports_it_instead_of_connecting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let own = listener.local_addr().unwrap();
+        let (events, mut inbox) = mpsc::channel(8);
+        let route = Route {
+            target: own.to_string(),
+            proxy: None,
+            i2p: None,
+            own: Some(own),
+        };
+        dial(route, 7, events).await.unwrap();
+        assert!(matches!(
+            inbox.recv().await,
+            Some(Event::DialedSelf { id: 7, target }) if target == own.to_string()
+        ));
     }
 }
