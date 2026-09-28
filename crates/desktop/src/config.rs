@@ -201,7 +201,13 @@ impl Startup {
                     network,
                     datadir: Some(paths::chain_dir(&network_dir)),
                     listen: settings.listen,
-                    connect: settings.connect,
+                    // Saved peers first, then the network's seeds, as nulld does.
+                    // Seeds come from the release, never from null.conf.
+                    connect: settings
+                        .connect
+                        .into_iter()
+                        .chain(network.seeds().iter().map(ToString::to_string))
+                        .collect(),
                     proxy: settings.proxy,
                     ..NodeConfig::test()
                 },
@@ -308,7 +314,11 @@ mod tests {
         };
         let startup = Startup::load(&args).unwrap();
         assert_eq!(startup.backend.node.network, Network::Main);
-        assert_eq!(startup.backend.node.connect, ["peer:19000"]);
+        assert_eq!(
+            startup.backend.node.connect.first().map(String::as_str),
+            Some("peer:19000"),
+            "saved peers come before the network's seeds"
+        );
         assert_eq!(startup.paths.wallet, dir.path().join("main/custom.redb"));
         let args = Args {
             datadir: Some(dir.path().into()),
@@ -430,5 +440,24 @@ mod tests {
         let older: Settings = toml::from_str("network = \"test\"").unwrap();
         assert_eq!(older.lock_after_minutes, DEFAULT_LOCK_MINUTES);
         assert!(toml::from_str::<Settings>("lock_after_minutes = -1").is_err());
+    }
+
+    #[test]
+    fn main_network_dials_its_seeds_without_saving_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = Args {
+            datadir: Some(dir.path().join("data")),
+            network: Some(Network::Main),
+            connect: vec!["peer:19000".into()],
+            ..Args::default()
+        };
+        let startup = Startup::load(&args).unwrap();
+        let connect = &startup.backend.node.connect;
+        assert_eq!(connect.first().map(String::as_str), Some("peer:19000"));
+        for seed in Network::Main.seeds() {
+            assert!(connect.iter().any(|c| c == seed), "{seed}");
+        }
+        let (saved, _) = read_settings(&startup.paths.config).unwrap();
+        assert_eq!(saved.connect, ["peer:19000"]);
     }
 }

@@ -14,9 +14,11 @@ make desktop ARGS="--network test --connect 127.0.0.1:19000"
 ```
 
 Start a testnet node separately as described in the README to have a peer
-to connect to; desktop itself embeds its own node. Public seed lists are
-currently empty. A desktop instance without peers can create and open
-wallets, but cannot learn new blocks or broadcast to other nodes.
+to connect to; desktop itself embeds its own node. On the main network it
+also dials the release's seed nodes (`seed1`–`seed5.nullnet.sh`); they are
+never written to `null.conf`. The test network has no public seeds. A
+desktop instance without peers can create and open wallets, but cannot
+learn new blocks or broadcast to other nodes.
 
 The native window needs a graphical desktop and an OpenGL-capable driver.
 Linux builds use the X11/Wayland development libraries required by eframe.

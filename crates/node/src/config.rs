@@ -17,6 +17,18 @@ pub const MEMPOOL_CAPACITY: usize = 10_000;
 /// Inbound connections accepted at once, by default.
 pub const DEFAULT_MAX_INBOUND: usize = 125;
 
+/// Port nodes accept peers on, as published in the seed list.
+pub const DEFAULT_P2P_PORT: u16 = 19000;
+
+/// Main network seed nodes, run by the project.
+const MAIN_SEEDS: [&str; 5] = [
+    "seed1.nullnet.sh:19000",
+    "seed2.nullnet.sh:19000",
+    "seed3.nullnet.sh:19000",
+    "seed4.nullnet.sh:19000",
+    "seed5.nullnet.sh:19000",
+];
+
 /// Which network to join.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Network {
@@ -51,11 +63,13 @@ impl Network {
             .find(|network| genesis(&network.params()).hash() == *hash)
     }
 
-    /// Bootstrap peers, as `host:port`. Empty until public infrastructure
-    /// exists; pass `--seed` or `--connect` meanwhile.
+    /// Bootstrap peers, as `host:port`. Hostnames are resolved when dialed,
+    /// so seed hosts can move without a release. The test network has no
+    /// public seeds; pass `--seed` or `--connect` for it.
     pub fn seeds(self) -> &'static [&'static str] {
         match self {
-            Self::Main | Self::Test => &[],
+            Self::Main => &MAIN_SEEDS,
+            Self::Test => &[],
         }
     }
 }
@@ -161,5 +175,23 @@ mod tests {
             assert_eq!(network.to_string().parse::<Network>(), Ok(network));
         }
         assert!("other".parse::<Network>().is_err());
+    }
+
+    #[test]
+    fn main_seeds_are_distinct_hosts_on_the_default_port() {
+        let seeds = Network::Main.seeds();
+        assert_eq!(seeds.len(), 5);
+        let mut hosts = std::collections::HashSet::new();
+        for seed in seeds {
+            let (host, port) = seed.rsplit_once(':').unwrap();
+            assert_eq!(port.parse::<u16>().unwrap(), DEFAULT_P2P_PORT, "{seed}");
+            assert!(host.ends_with(".nullnet.sh"), "{seed}");
+            assert!(hosts.insert(host), "duplicate {seed}");
+        }
+    }
+
+    #[test]
+    fn the_test_network_has_no_public_seeds() {
+        assert!(Network::Test.seeds().is_empty());
     }
 }

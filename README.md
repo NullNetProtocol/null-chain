@@ -115,8 +115,9 @@ second node that connects to it:
 To reach peers over Tor, add `--proxy 127.0.0.1:9050`; every outbound
 connection then goes through the SOCKS5 proxy and `.onion` names work in
 `--connect`. For I2P, add `--i2p 127.0.0.1:7656` to reach `.i2p` peers
-through a router's SAM bridge. Seed lists are empty until a public
-network exists, so pass `--connect` or `--seed`.
+through a router's SAM bridge. The main network dials
+`seed1`–`seed5.nullnet.sh:19000` automatically. The test network has no
+public seeds, so pass `--connect` or `--seed` there.
 
 Each node logs with a level and a timestamp — `21:17:47 INFO  mined block 1 …` —
 colored when the output is a terminal (set `NO_COLOR` or pipe it to disable);

@@ -103,7 +103,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Wire protocol: fixed message set with bounded lists, length-prefixed framing, version handshake, Noise NN encrypted transport chunked for large messages
 - [x] Address book: bounded, timestamp-sanitized gossip, bans, failure-aware candidates
 - [x] Peer state: handshake, keepalive, misbehavior score to ban
-- [x] Seed list per network (empty until launch), `--seed`, hostnames resolved at dial time
+- [x] Seed list per network, `--seed`, hostnames resolved at dial time; main network seeds `seed1`–`seed5.nullnet.sh:19000` (2026-09-28)
 - [x] Peer discovery bootstraps: dialed peers enter the address book and are gossiped, so a node reaches peers it was never configured with (self-advertising the listen address is future work)
 - [x] Headers-first sync state machine: locator, chained header acceptance, bounded in-flight block requests with timeouts
 - [x] Dandelion++ routing state: epochs, stem map, fluff probability, embargo timers
@@ -164,7 +164,8 @@ Tick an item only when it has tests and passes clippy.
   - [x] Phase 4: payment disclosure (`getpaymentdisclosure` in the daemon, `verifypaymentdisclosure` in the node) and address ownership by challenge (`createchallenge` in the node, `answerchallenge` in the daemon), `crates/protocol/src/disclosure.rs`
 - [x] Local testnet (see README)
 - [x] Faucet command, Dockerfile, systemd unit and Tor configuration in `deploy/`
-- [ ] Public testnet: run the seed nodes and the faucet on public hosts and fill the seed lists
+- [ ] Run nulld on the five seed hosts and publish DNS for `seed1`–`seed5.nullnet.sh`
+- [ ] Public testnet: run seed nodes and the faucet on public hosts and fill the test seed list
 - [x] Reproducible build recipe: pinned toolchain image, `--locked`, fixed `SOURCE_DATE_EPOCH`; compare digests across builders before release
 - [x] Supply integrity: exact coinbase credit and single value-creating transaction per block are tested at block level; emission sum tested under the cap;
       document that a fully shielded pool cannot be externally audited
