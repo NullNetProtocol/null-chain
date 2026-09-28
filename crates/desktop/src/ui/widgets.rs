@@ -224,8 +224,14 @@ pub fn nav_item(ui: &mut Ui, label: &str, selected: bool) -> Response {
         .fill(fill)
         .stroke(Stroke::NONE)
         .min_size(egui::vec2(ui.available_width(), theme::CONTROL_HEIGHT));
-    ui.with_layout(Layout::left_to_right(Align::Center), |ui| ui.add(button))
-        .inner
+    // A row of exactly one control's height: laying out in the parent's
+    // whole remaining space would centre the item vertically in the panel.
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), theme::CONTROL_HEIGHT),
+        Layout::left_to_right(Align::Center),
+        |ui| ui.add(button),
+    )
+    .inner
 }
 
 /// Minimum size of a button: content width, comfortable height.
@@ -314,5 +320,36 @@ mod tests {
     #[test]
     fn qr_codes_differ_for_different_text() {
         assert_ne!(qr_modules("tnull1a"), qr_modules("tnull1b"));
+    }
+
+    #[test]
+    fn sidebar_items_stack_from_the_top_and_fit_a_small_window() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let height = 580.0;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(760.0, height),
+            )),
+            ..Default::default()
+        };
+        let mut rects = Vec::new();
+        let _ = ctx.run(input, |ctx| {
+            egui::SidePanel::left("nav")
+                .exact_width(theme::SIDEBAR_WIDTH)
+                .show(ctx, |ui| {
+                    for label in ["Overview", "Receive", "Send", "Activity", "Node"] {
+                        rects.push(nav_item(ui, label, label == "Send").rect);
+                    }
+                });
+        });
+        let first = rects[0];
+        assert!(first.top() < theme::CONTROL_HEIGHT * 2.0, "{first:?}");
+        for pair in rects.windows(2) {
+            let gap = pair[1].top() - pair[0].bottom();
+            assert!((0.0..=theme::SPACE_MD).contains(&gap), "{pair:?}");
+        }
+        assert!(rects.iter().all(|r| r.bottom() <= height), "{rects:?}");
     }
 }
