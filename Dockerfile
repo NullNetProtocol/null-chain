@@ -8,7 +8,9 @@ ENV CARGO_INCREMENTAL=0
 RUN cargo build --release --locked -p null-node \
     && sha256sum target/release/nulld
 
-FROM debian:bookworm-slim
+# Same Debian release as the rust image above: a binary linked against a
+# newer glibc than the runtime has does not start.
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/nulld /usr/local/bin/nulld
