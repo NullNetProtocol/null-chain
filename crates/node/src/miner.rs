@@ -116,7 +116,8 @@ impl Template {
     }
 
     /// Assembles the block and mines it, trying a bounded number of
-    /// nonces.
+    /// nonces, and giving up early when `keep_going` says no: before the
+    /// coinbase proof and before each nonce.
     ///
     /// # Errors
     /// Fails on a building or proving error.
@@ -126,9 +127,13 @@ impl Template {
         pk: &ProvingKey,
         pow: &EquihashPow,
         rng: &mut (impl RngCore + CryptoRng),
+        keep_going: impl Fn() -> bool,
     ) -> Result<Option<Block>> {
+        if !keep_going() {
+            return Ok(None);
+        }
         let (mut header, transactions) = self.assemble(miner, pk, rng)?;
-        if pow.mine(&mut header, NONCES_PER_TEMPLATE, rng)? {
+        if pow.mine_while(&mut header, NONCES_PER_TEMPLATE, rng, keep_going)? {
             Ok(Some(Block::new(header, transactions)))
         } else {
             Ok(None)
@@ -136,8 +141,8 @@ impl Template {
     }
 }
 
-/// A running miner. Workers finish their current attempt, at most
-/// a few dozen nonces, and exit once it is stopped.
+/// A running miner. Once stopped, workers finish the nonce they are
+/// solving (seconds on the main network) and exit.
 pub struct Miner {
     stop: Arc<AtomicBool>,
     task: JoinHandle<Result<()>>,
@@ -248,11 +253,14 @@ impl Worker {
                 return Err(Error::Stopped);
             };
             let (payout, pow, pk) = (self.payout, self.pow, Arc::clone(&self.pk));
+            let stop = Arc::clone(&self.stop);
             // Proving and solving are CPU-bound; run them on the blocking pool
             // so many workers use many cores without starving the runtime.
             let found = tokio::task::spawn_blocking(move || {
                 let mut rng = rand::rngs::OsRng;
-                template.mine(&payout, pk.as_ref(), &pow, &mut rng)
+                template.mine(&payout, pk.as_ref(), &pow, &mut rng, || {
+                    !stop.load(Ordering::Relaxed)
+                })
             })
             .await
             .map_err(|_| Error::Stopped)??;

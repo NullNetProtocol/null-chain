@@ -41,14 +41,6 @@ pub fn user_data_dir() -> Result<PathBuf> {
 /// # Errors
 /// See [`user_data_dir`].
 pub fn data_dir_from(mut env: impl FnMut(&str) -> Option<OsString>) -> Result<PathBuf> {
-    let required = |value: Option<OsString>| {
-        value
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                Error::Argument("cannot locate user data directory; pass --datadir".into())
-            })
-    };
     #[cfg(target_os = "windows")]
     {
         Ok(required(env("LOCALAPPDATA").or_else(|| env("APPDATA")))?.join("Null"))
@@ -59,14 +51,37 @@ pub fn data_dir_from(mut env: impl FnMut(&str) -> Option<OsString>) -> Result<Pa
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        if let Some(root) = env("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-        {
-            return Ok(root.join("null"));
-        }
-        Ok(required(env("HOME"))?.join(".local/share/null"))
+        Ok(data_home_from(&mut env)?.join("null"))
     }
+}
+
+/// The value of a required environment variable as a path.
+fn required(value: Option<OsString>) -> Result<PathBuf> {
+    value
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| Error::Argument("cannot locate user data directory; pass --datadir".into()))
+}
+
+/// The XDG base data directory: `$XDG_DATA_HOME` when absolute, else
+/// `~/.local/share`. Desktop entries and icons live under it.
+///
+/// # Errors
+/// See [`user_data_dir`].
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn data_home() -> Result<PathBuf> {
+    data_home_from(|key| std::env::var_os(key))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn data_home_from(mut env: impl FnMut(&str) -> Option<OsString>) -> Result<PathBuf> {
+    if let Some(root) = env("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        return Ok(root);
+    }
+    Ok(required(env("HOME"))?.join(".local/share"))
 }
 
 /// The directory holding one network's chain and wallet.

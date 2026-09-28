@@ -81,7 +81,26 @@ impl EquihashPow {
         max_nonces: u32,
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Result<bool, Error> {
+        self.mine_while(header, max_nonces, rng, || true)
+    }
+
+    /// [`Self::mine`], asking `keep_going` before each nonce and giving up
+    /// when it says no. One solve of the main network's parameters takes
+    /// seconds, so a miner that must stop promptly checks between them.
+    ///
+    /// # Errors
+    /// Fails on a malformed target in the header.
+    pub fn mine_while(
+        &self,
+        header: &mut BlockHeader,
+        max_nonces: u32,
+        rng: &mut (impl RngCore + CryptoRng),
+        keep_going: impl Fn() -> bool,
+    ) -> Result<bool, Error> {
         for _ in 0..max_nonces {
+            if !keep_going() {
+                return Ok(false);
+            }
             rng.fill_bytes(&mut header.nonce);
             if self.try_nonce(header)? {
                 return Ok(true);
@@ -144,5 +163,26 @@ mod tests {
         let params = ChainParams::test();
         let pow = EquihashPow::new(params.equihash);
         assert!(pow.check(&header(&params)).is_err());
+    }
+
+    #[test]
+    fn mining_stops_before_the_next_nonce_when_asked() {
+        let params = ChainParams::test();
+        let pow = EquihashPow::new(params.equihash);
+        let mut rng = ChaCha20Rng::seed_from_u64(9);
+        let mut h = header(&params);
+        let before = h.nonce;
+        assert!(!pow.mine_while(&mut h, 64, &mut rng, || false).unwrap());
+        assert_eq!(h.nonce, before, "no nonce was tried");
+
+        let tried = std::cell::Cell::new(0u32);
+        let keep_going = || {
+            tried.set(tried.get() + 1);
+            tried.get() <= 3
+        };
+        // An impossible target so every nonce fails and the count is exact.
+        h.target = 0x0300_0001;
+        assert!(!pow.mine_while(&mut h, 64, &mut rng, keep_going).unwrap());
+        assert_eq!(tried.get(), 4, "three nonces, then the fourth check stops");
     }
 }

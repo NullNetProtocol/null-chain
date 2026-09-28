@@ -14,7 +14,7 @@ use super::icons::{arc, stroke_path};
 use super::theme;
 
 /// The official app icon, 1024×1024, dark background.
-const ICON_PNG: &[u8] = include_bytes!("../../assets/icon.png");
+pub const ICON_PNG: &[u8] = include_bytes!("../../assets/icon.png");
 
 /// Stroke width of the banner's mark and letters, in banner units.
 const BANNER_STROKE: f32 = 30.0;

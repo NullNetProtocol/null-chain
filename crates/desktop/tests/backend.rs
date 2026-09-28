@@ -417,3 +417,25 @@ async fn mining_needs_a_wallet_pays_its_main_address_and_follows_lock() {
         .contains("mine = false"));
     backend.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mining_changes_answer_at_once_while_the_miner_is_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = Backend::spawn(setup(&dir.path().join("data")).backend);
+    ready(&mut backend).await;
+    open(&backend, OpenMode::Create).await;
+    set_mining(&backend, true, 2).await.unwrap();
+    // The new miner is still building its proving key, which takes
+    // seconds; a switch or thread change must not wait for it.
+    for (enabled, threads) in [(true, 1), (false, 1)] {
+        let started = std::time::Instant::now();
+        set_mining(&backend, enabled, threads).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "waited {:?} for the old miner",
+            started.elapsed()
+        );
+    }
+    mining_until(&mut backend, |m| m["active"] == false).await;
+    backend.shutdown().await.unwrap();
+}

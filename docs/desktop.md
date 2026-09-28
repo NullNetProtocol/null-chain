@@ -210,7 +210,12 @@ than styling egui widgets directly.
 
 The window icon is the official `assets/icon.png`. On Wayland the
 compositor shows the icon from the desktop entry matching the app id
-`sh.nullnet.Wallet`; `make desktop-entry` installs one for this checkout.
+`sh.nullnet.Wallet`, so on Linux the app installs that entry into
+`~/.local/share/applications` (or `$XDG_DATA_HOME/applications`) and the
+icon into `~/.local/share/icons` at startup. It rewrites them only when
+they are missing or stale, and the entry also puts NULL Wallet in the app
+menu. The compositor may need a moment to notice a new entry, so the icon
+can appear from the second launch.
 
 To add a screen: create `ui/screens/<name>.rs` with a `show` function (and
 `Form` if it has inputs), wrap it in `widgets::page`, group content in

@@ -6,5 +6,5 @@ Comment=Shielded NULL wallet with an embedded full node
 Exec=@BIN@
 Icon=@ICON@
 Terminal=false
-Categories=Finance;Network;
+Categories=Office;Finance;Network;
 StartupWMClass=sh.nullnet.Wallet

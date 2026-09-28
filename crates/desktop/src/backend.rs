@@ -313,17 +313,22 @@ async fn run(
 impl State {
     async fn lock(&mut self) {
         // The miner pays the wallet's address, so it stops with the wallet.
-        self.stop_mining().await;
+        self.stop_mining();
         if let Some(service) = self.wallet.take() {
             service.shutdown().await;
         }
     }
 
-    async fn stop_mining(&mut self) {
+    /// Asks the miner to stop and lets its workers finish in the
+    /// background. Each ends within one solve, which takes seconds on the
+    /// main network, and the backend must keep answering the GUI meanwhile.
+    fn stop_mining(&mut self) {
         if let Some(miner) = self.miner.take() {
-            if let Err(error) = miner.stop().await {
-                null_node::logging::warn(&format!("miner stopped: {error}"));
-            }
+            tokio::spawn(async move {
+                if let Err(error) = miner.stop().await {
+                    null_node::logging::warn(&format!("miner stopped: {error}"));
+                }
+            });
         }
     }
 
@@ -341,12 +346,12 @@ impl State {
 
     /// Applies and saves a mining choice. Mining keeps its new state even
     /// if saving fails; the message says so.
-    async fn set_mining(&mut self, mining: Mining) -> Result<Outcome> {
+    fn set_mining(&mut self, mining: Mining) -> Result<Outcome> {
         let mining = mining.clamped();
         if mining.enabled && self.wallet.is_none() {
             return Err(Error::Argument("unlock your wallet to mine".into()));
         }
-        self.stop_mining().await;
+        self.stop_mining();
         if mining.enabled {
             self.start_mining(mining.threads)?;
         }
@@ -396,7 +401,7 @@ impl State {
                     ..Outcome::message("Wallet unlocked")
                 })
             }
-            Action::SetMining(mining) => self.set_mining(mining).await,
+            Action::SetMining(mining) => self.set_mining(mining),
             Action::Call { method, params } => {
                 let result = self
                     .call(&method, &Params::new(params))

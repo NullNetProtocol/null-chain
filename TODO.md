@@ -182,6 +182,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Receive QR codes, exact fee quote (`quotepayment`) before confirming, idle auto-lock (`lock_after_minutes`), three-word recovery phrase check, cancel queued payments, received memos (2026-09-25)
 - [x] NULL brand: website palette (black and terminal green), vector logo and nav icons, window icon, Linux desktop entry (2026-09-28)
 - [x] Desktop mining: switch and thread slider on the Node page, main (index 0) address payout, needs an unlocked wallet, stops on lock, saved in `null.conf`; runtime start/stop in `null_node::miner` (2026-09-28)
+- [x] Mining stops within one solve and never blocks the GUI; Linux app installs its own desktop entry so Wayland taskbars show the brand icon (2026-09-28)
 - [ ] Transaction detail view (`gettransaction`), file pickers, viewing-key export and rescan from the GUI
 - [ ] Pagination, push-driven UI updates, accessibility, native platform tests and signed packages
 - [ ] Desktop security review, including toolkit copies of secrets and shared node/wallet process
