@@ -1,0 +1,103 @@
+[workspace]
+resolver = "2"
+exclude = ["fuzz"]
+members = [
+    "crates/crypto",
+    "crates/circuit",
+    "crates/protocol",
+    "crates/chain",
+    "crates/storage",
+    "crates/p2p",
+    "crates/wallet",
+    "crates/node",
+    "crates/desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/NullNetProtocol/null"
+
+[workspace.dependencies]
+# internal
+null-crypto = { path = "crates/crypto" }
+null-circuit = { path = "crates/circuit" }
+null-protocol = { path = "crates/protocol" }
+null-chain = { path = "crates/chain" }
+null-storage = { path = "crates/storage" }
+null-p2p = { path = "crates/p2p" }
+null-wallet = { path = "crates/wallet" }
+
+# cryptography
+pasta_curves = "0.5"
+ff = "0.13"
+group = "0.13"
+blake2b_simd = "1"
+subtle = "2"
+zeroize = { version = "1", features = ["derive"] }
+rand_core = "0.6"
+reddsa = "0.5"
+halo2_proofs = "0.3"
+halo2_gadgets = "0.5"
+halo2_poseidon = "0.1"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+chacha20 = { version = "0.9", default-features = false }
+
+# encoding
+bech32 = "0.11"
+
+# errors and utilities
+thiserror = "2"
+
+# wallet
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+rpassword = "7"
+
+# storage
+redb = "4"
+incrementalmerkletree = "0.8"
+
+# chain
+uint = "0.10"
+equihash = "0.3"
+
+# node
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# networking
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-chacha20poly1305", "use-blake2", "use-curve25519", "use-getrandom", "std"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "time", "sync"] }
+
+# testing
+rand = "0.8"
+rand_chacha = "0.3"
+tempfile = "3"
+proptest = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+
+[profile.test]
+opt-level = 1

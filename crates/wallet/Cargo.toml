@@ -1,0 +1,30 @@
+[package]
+name = "null-wallet"
+description = "Scanning, note management and transaction building"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+null-crypto.workspace = true
+null-circuit.workspace = true
+null-protocol.workspace = true
+redb.workspace = true
+argon2.workspace = true
+chacha20poly1305.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+rand_core = { workspace = true, features = ["getrandom"] }
+shardtree = "0.6"
+incrementalmerkletree.workspace = true
+bip39 = { version = "2", features = ["rand_core", "zeroize"] }
+
+[dev-dependencies]
+rand.workspace = true
+rand_chacha.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

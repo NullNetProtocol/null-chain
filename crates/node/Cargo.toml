@@ -1,0 +1,42 @@
+[package]
+name = "null-node"
+description = "The node daemon: event loop, miner, local RPC and command line"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nulld"
+path = "src/main.rs"
+
+[[bin]]
+name = "null-wallet-rpc"
+path = "src/bin/wallet_rpc.rs"
+
+[dependencies]
+null-crypto.workspace = true
+null-circuit.workspace = true
+null-protocol.workspace = true
+null-storage.workspace = true
+null-chain.workspace = true
+null-p2p.workspace = true
+null-wallet.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rpassword.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+
+[dev-dependencies]
+rand_chacha.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

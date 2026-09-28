@@ -1,0 +1,21 @@
+# systemd unit for a public node. Adjust paths, then:
+#   systemctl enable --now nulld
+# The control token lands in /var/lib/null/rpc.token, owner-readable.
+[Unit]
+Description=nulld node
+After=network-online.target
+
+[Service]
+User=null
+ExecStart=/usr/local/bin/nulld run --network test \
+    --datadir /var/lib/null \
+    --listen 0.0.0.0:19000 \
+    --rpc 127.0.0.1:18444
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/null
+
+[Install]
+WantedBy=multi-user.target

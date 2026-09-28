@@ -1,0 +1,24 @@
+[package]
+name = "null-protocol"
+description = "Notes, nullifiers, addresses, amounts and transaction rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+null-crypto.workspace = true
+null-circuit.workspace = true
+bech32.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+rand_core.workspace = true
+ff.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+rand_chacha.workspace = true
+
+[lints]
+workspace = true

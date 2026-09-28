@@ -1,0 +1,6 @@
+# Expose a node as an onion service and dial peers through Tor.
+# Run the node with --proxy 127.0.0.1:9050 and share the hostname found
+# in /var/lib/tor/nulld/hostname with peers as <hostname>:19000.
+SocksPort 127.0.0.1:9050
+HiddenServiceDir /var/lib/tor/nulld
+HiddenServicePort 19000 127.0.0.1:19000

@@ -1,0 +1,27 @@
+[package]
+name = "null-circuit"
+description = "Halo2 action circuit: spend and output statement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+null-crypto.workspace = true
+halo2_proofs.workspace = true
+halo2_gadgets.workspace = true
+halo2_poseidon.workspace = true
+pasta_curves.workspace = true
+ff.workspace = true
+group.workspace = true
+thiserror.workspace = true
+rand_core.workspace = true
+
+[dev-dependencies]
+halo2_gadgets = { workspace = true, features = ["test-dependencies"] }
+rand.workspace = true
+rand_chacha.workspace = true
+
+[lints]
+workspace = true

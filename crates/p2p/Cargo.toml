@@ -1,0 +1,25 @@
+[package]
+name = "null-p2p"
+description = "Wire protocol, encrypted transport, peer management, sync and Dandelion++ relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+null-protocol.workspace = true
+snow.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+rand_core.workspace = true
+
+[dev-dependencies]
+null-crypto.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true

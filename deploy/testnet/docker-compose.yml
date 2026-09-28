@@ -1,0 +1,71 @@
+# A six-node testnet on one machine. Keys and the control token below are
+# for this test only; every container shares the token so the faucet and
+# the trader can drive other containers' nodes.
+#
+#   docker compose -f deploy/testnet/docker-compose.yml up -d --build
+#   docker compose -f deploy/testnet/docker-compose.yml exec follower1 nulld status
+#   docker compose -f deploy/testnet/docker-compose.yml logs -f trader
+#   docker compose -f deploy/testnet/docker-compose.yml down -v
+
+x-keys: &keys
+  NULL_RPC_TOKEN: "testnet-control-token"
+  MINER1_SK: "1111111111111111111111111111111111111111111111111111111111111111"
+  MINER2_SK: "2222222222222222222222222222222222222222222222222222222222222222"
+  FAUCET_SK: "3333333333333333333333333333333333333333333333333333333333333333"
+  TRADER_SK: "4444444444444444444444444444444444444444444444444444444444444444"
+
+services:
+  miner1:
+    build: ../..
+    entrypoint: /usr/local/bin/entrypoint.sh
+    environment:
+      <<: *keys
+      ROLE: miner
+      SK: "1111111111111111111111111111111111111111111111111111111111111111"
+      CONNECT_ARGS: ""
+  miner2:
+    build: ../..
+    entrypoint: /usr/local/bin/entrypoint.sh
+    depends_on: [miner1]
+    environment:
+      <<: *keys
+      ROLE: miner
+      SK: "2222222222222222222222222222222222222222222222222222222222222222"
+      # Mines to the faucet, so the faucet has coins to hand out.
+      MINE_TO_SK: "3333333333333333333333333333333333333333333333333333333333333333"
+      CONNECT_ARGS: "--connect miner1:19000 --connect follower1:19000"
+  follower1:
+    build: ../..
+    entrypoint: /usr/local/bin/entrypoint.sh
+    depends_on: [miner1]
+    environment:
+      <<: *keys
+      ROLE: follower
+      CONNECT_ARGS: "--connect miner1:19000"
+  follower2:
+    build: ../..
+    entrypoint: /usr/local/bin/entrypoint.sh
+    depends_on: [miner2, follower1]
+    environment:
+      <<: *keys
+      ROLE: follower
+      CONNECT_ARGS: "--connect miner2:19000 --connect follower1:19000"
+  faucet:
+    build: ../..
+    entrypoint: /usr/local/bin/entrypoint.sh
+    depends_on: [follower1]
+    environment:
+      <<: *keys
+      ROLE: faucet
+      SK: "3333333333333333333333333333333333333333333333333333333333333333"
+      NODE_RPC: "follower1:18444"
+  trader:
+    build: ../..
+    entrypoint: /usr/local/bin/entrypoint.sh
+    depends_on: [follower2, faucet]
+    environment:
+      <<: *keys
+      ROLE: trader
+      SK: "4444444444444444444444444444444444444444444444444444444444444444"
+      NODE_RPC: "follower2:18444"
+      TARGET_SKS: "1111111111111111111111111111111111111111111111111111111111111111 2222222222222222222222222222222222222222222222222222222222222222"

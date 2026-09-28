@@ -1,0 +1,27 @@
+[package]
+name = "null-chain"
+description = "Proof of work, difficulty adjustment, block validation and chain state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+null-crypto.workspace = true
+null-circuit.workspace = true
+null-protocol.workspace = true
+null-storage.workspace = true
+blake2b_simd.workspace = true
+thiserror.workspace = true
+rand_core.workspace = true
+uint.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+equihash.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[lints]
+workspace = true

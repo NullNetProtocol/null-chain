@@ -1,0 +1,32 @@
+[package]
+name = "null-crypto"
+description = "Cryptographic building blocks: curves, hashes, key derivation, commitments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pasta_curves.workspace = true
+ff.workspace = true
+group.workspace = true
+blake2b_simd.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+rand_core.workspace = true
+reddsa.workspace = true
+chacha20poly1305.workspace = true
+chacha20.workspace = true
+thiserror.workspace = true
+fpe = { version = "0.6", default-features = false, features = ["alloc"] }
+aes = "0.8"
+halo2_poseidon.workspace = true
+incrementalmerkletree.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+rand_chacha.workspace = true
+
+[lints]
+workspace = true
