@@ -5,7 +5,9 @@
 //! is the shell: navigation, status bar, routing, and performing the
 //! [`Effect`]s screens return.
 
+pub mod brand;
 mod format;
+mod icons;
 mod idle;
 mod screens;
 mod theme;
@@ -21,6 +23,7 @@ use tokio::sync::{oneshot, watch};
 use zeroize::Zeroizing;
 
 use format::text;
+use icons::Icon;
 use idle::IdleLock;
 use screens::backup::Backup;
 use theme::Tone;
@@ -38,13 +41,13 @@ enum Page {
 }
 
 impl Page {
-    /// Sidebar order and titles.
-    const ALL: [(Self, &'static str); 5] = [
-        (Self::Overview, "Overview"),
-        (Self::Receive, "Receive"),
-        (Self::Send, "Send"),
-        (Self::Activity, "Activity"),
-        (Self::Node, "Node"),
+    /// Sidebar order, titles, and icons.
+    const ALL: [(Self, &'static str, Icon); 5] = [
+        (Self::Overview, "Overview", Icon::Overview),
+        (Self::Receive, "Receive", Icon::Receive),
+        (Self::Send, "Send", Icon::Send),
+        (Self::Activity, "Activity", Icon::Activity),
+        (Self::Node, "Node", Icon::Node),
     ];
 }
 
@@ -189,10 +192,11 @@ impl App {
             .frame(chrome_frame(Margin::same(16)))
             .show(ctx, |ui| {
                 brand(ui);
-                for (page, title) in Page::ALL {
-                    if widgets::nav_item(ui, title, self.page == page).clicked() {
+                for (page, title, icon) in Page::ALL {
+                    if widgets::nav_item(ui, icon, title, self.page == page).clicked() {
                         self.page = page;
                     }
+                    ui.add_space(theme::SPACE_XS);
                 }
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                     self.wallet_status(ui, state);
@@ -212,7 +216,11 @@ impl App {
             ("No wallet", Tone::Warning)
         };
         widgets::badge(ui, label, tone);
-        widgets::badge(ui, text(&state.node, "network"), Tone::Info);
+        // The network is unknown until the node has started.
+        let network = text(&state.node, "network");
+        if network != format::MISSING {
+            widgets::badge(ui, network, Tone::Info);
+        }
     }
 
     fn status_bar(&self, ctx: &egui::Context, state: &Snapshot) {
@@ -277,15 +285,26 @@ fn route(
     None
 }
 
+/// Width of the logo in the sidebar.
+const SIDEBAR_LOGO_WIDTH: f32 = 128.0;
+/// Extra spacing between tagline letters, as in the brand banner.
+const TAGLINE_LETTER_SPACING: f32 = 2.0;
+
 fn brand(ui: &mut Ui) {
     ui.add_space(theme::SPACE_SM);
-    ui.label(
-        RichText::new("NULL")
-            .size(theme::HEADING_SIZE + 4.0)
-            .strong()
-            .color(theme::ACCENT_TEXT),
-    );
-    widgets::caption(ui, "Private by construction");
+    ui.horizontal(|ui| {
+        ui.add_space(theme::SPACE_SM);
+        ui.vertical(|ui| {
+            brand::logo(ui, SIDEBAR_LOGO_WIDTH);
+            ui.add_space(theme::SPACE_XS);
+            ui.label(
+                RichText::new("PRIVACY BY DEFAULT")
+                    .size(theme::SMALL_SIZE - 2.0)
+                    .extra_letter_spacing(TAGLINE_LETTER_SPACING)
+                    .color(theme::TEXT_MUTED),
+            );
+        });
+    });
     ui.add_space(theme::SPACE_XL);
 }
 
@@ -369,7 +388,7 @@ mod tests {
         theme::apply(&ctx);
         let mut screens = Screens::default();
         let mut produced = Vec::new();
-        for (page, _) in Page::ALL {
+        for (page, _, _) in Page::ALL {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     produced.push(route(page, &mut screens, ui, state, &paths()).is_some());

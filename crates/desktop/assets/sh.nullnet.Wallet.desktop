@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NULL Wallet
+GenericName=Private wallet
+Comment=Shielded NULL wallet with an embedded full node
+Exec=@BIN@
+Icon=@ICON@
+Terminal=false
+Categories=Finance;Network;
+StartupWMClass=sh.nullnet.Wallet

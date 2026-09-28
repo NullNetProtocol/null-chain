@@ -5,7 +5,10 @@ use null_desktop::backend::{Action, OpenMode};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::Effect;
-use crate::ui::theme;
+use crate::ui::{brand, theme};
+
+/// Side of the NULL mark above the welcome choices.
+const WELCOME_MARK_SIZE: f32 = 72.0;
 use crate::ui::widgets;
 
 /// Which setup step is showing when no wallet exists yet.
@@ -69,6 +72,8 @@ impl Form {
     }
 
     fn welcome(&mut self, ui: &mut Ui) {
+        brand::mark(ui, WELCOME_MARK_SIZE);
+        ui.add_space(theme::SPACE_LG);
         widgets::page(
             ui,
             "Welcome to NULL",

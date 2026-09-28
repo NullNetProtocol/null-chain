@@ -29,9 +29,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = backend.client.clone();
     let snapshots = backend.snapshots.clone();
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 720.0])
-            .with_min_inner_size([760.0, 580.0]),
+        viewport: with_icon(
+            eframe::egui::ViewportBuilder::default()
+                .with_title("NULL Wallet")
+                .with_app_id("sh.nullnet.Wallet")
+                .with_inner_size([1000.0, 720.0])
+                .with_min_inner_size([760.0, 580.0]),
+        ),
         ..eframe::NativeOptions::default()
     };
     let gui = eframe::run_native(
@@ -53,4 +57,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     gui?;
     shutdown?;
     Ok(())
+}
+
+/// Adds the brand icon for the window, taskbar, and task switcher.
+fn with_icon(viewport: eframe::egui::ViewportBuilder) -> eframe::egui::ViewportBuilder {
+    match ui::brand::window_icon() {
+        Some(icon) => viewport.with_icon(icon),
+        None => viewport,
+    }
 }

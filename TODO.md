@@ -179,6 +179,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Automatic OS-standard data directories and `null.conf`; first-run create/import onboarding and automatic existing-wallet detection (2026-09-23)
 - [x] Design system: theme tokens with contrast tests, shared widgets, one module per screen returning effects (2026-09-24)
 - [x] Receive QR codes, exact fee quote (`quotepayment`) before confirming, idle auto-lock (`lock_after_minutes`), three-word recovery phrase check, cancel queued payments, received memos (2026-09-25)
+- [x] NULL brand: website palette (black and terminal green), vector logo and nav icons, window icon, Linux desktop entry (2026-09-28)
 - [ ] Transaction detail view (`gettransaction`), file pickers, viewing-key export and rescan from the GUI
 - [ ] Pagination, push-driven UI updates, accessibility, native platform tests and signed packages
 - [ ] Desktop security review, including toolkit copies of secrets and shared node/wallet process

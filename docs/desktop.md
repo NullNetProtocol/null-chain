@@ -164,6 +164,12 @@ than styling egui widgets directly.
   that every text color meets WCAG AA contrast on every background, and
   that each tone is readable on its own tint. No other file names a color
   or a literal size.
+- The palette follows the NULL website's dark theme: near-black neutrals
+  and one terminal-green accent (`#51E57E`), with the brand's `#030303`
+  for chrome. `ui/brand.rs` draws the ∅ mark and NULL wordmark from the
+  `brand-assets` stroke geometry, always white. `ui/icons.rs` holds line
+  icons on a 16×16 grid in the same stroke style. Add icons there rather
+  than using an icon font or images.
 - `ui/widgets.rs` holds the building blocks made from those tokens: `page`,
   `card`, `highlighted_card`, `section`, `card_title`, `caption`, `stat`,
   `display_amount`, `field_label`, `primary_button`, `secondary_button`,
@@ -186,10 +192,14 @@ than styling egui widgets directly.
   effects. Its headless test renders every page with empty, locked, and
   populated snapshots.
 
+The window icon is the official `assets/icon.png`. On Wayland the
+compositor shows the icon from the desktop entry matching the app id
+`sh.nullnet.Wallet`; `make desktop-entry` installs one for this checkout.
+
 To add a screen: create `ui/screens/<name>.rs` with a `show` function (and
 `Form` if it has inputs), wrap it in `widgets::page`, group content in
-cards, use one `primary_button` per view, add a `Page` variant to
-`Page::ALL`, and route it in `route`.
+cards, use one `primary_button` per view, add a `Page` variant with its
+title and icon to `Page::ALL`, and route it in `route`.
 
 ## Remaining desktop work
 

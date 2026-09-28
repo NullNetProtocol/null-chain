@@ -67,6 +67,19 @@ wallet-rpc: release ## Run the wallet daemon (make wallet-rpc ARGS="--wallet w.r
 desktop: ## Run the native wallet with its embedded node and RPC
 	$(CARGO) run --release -p null-desktop -- $(ARGS)
 
+# Wayland compositors take a window's icon from the .desktop file matching
+# its app id (sh.nullnet.Wallet), not from the window itself.
+APPLICATIONS ?= $(HOME)/.local/share/applications
+
+.PHONY: desktop-entry
+desktop-entry: ## Linux: add NULL Wallet to the app menu with its icon (uses this checkout's release build)
+	$(CARGO) build --release -p null-desktop
+	mkdir -p $(APPLICATIONS)
+	sed -e 's|@BIN@|$(CURDIR)/target/release/null-desktop|' \
+	    -e 's|@ICON@|$(CURDIR)/crates/desktop/assets/icon.png|' \
+	    crates/desktop/assets/sh.nullnet.Wallet.desktop > $(APPLICATIONS)/sh.nullnet.Wallet.desktop
+	@echo "Installed $(APPLICATIONS)/sh.nullnet.Wallet.desktop"
+
 .PHONY: testnet
 testnet: ## Two-node local testnet with a payment and faucet (scripts/testnet.sh)
 	./scripts/testnet.sh

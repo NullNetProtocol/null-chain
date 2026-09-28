@@ -7,34 +7,48 @@ use eframe::egui::{
     self, Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle,
 };
 
-/// Window and content background.
-pub const BACKGROUND: Color32 = Color32::from_rgb(0x0E, 0x11, 0x16);
-/// Sidebar and status bar background, slightly darker than the content.
-pub const CHROME: Color32 = Color32::from_rgb(0x0A, 0x0C, 0x10);
-/// Card background.
-pub const SURFACE: Color32 = Color32::from_rgb(0x16, 0x1B, 0x22);
-/// Text input and hovered-row background.
-pub const SURFACE_RAISED: Color32 = Color32::from_rgb(0x1C, 0x22, 0x2B);
-/// Card borders and separators.
-pub const BORDER: Color32 = Color32::from_rgb(0x26, 0x2D, 0x38);
-/// Primary text.
-pub const TEXT: Color32 = Color32::from_rgb(0xE6, 0xEA, 0xF0);
-/// Secondary text: labels, hints, and captions.
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x9A, 0xA4, 0xB2);
-/// Primary button fill; white text on it meets WCAG AA.
-pub const ACCENT: Color32 = Color32::from_rgb(0x5B, 0x4B, 0xD6);
-/// Primary button fill while hovered.
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x6A, 0x5A, 0xE0);
+// Palette: the NULL website's dark theme (near-black neutrals with one
+// terminal-green accent) and the brand's #030303 chrome.
+
+/// Window and content background (website `--background`).
+pub const BACKGROUND: Color32 = Color32::from_rgb(0x0A, 0x0A, 0x0A);
+/// Sidebar and status bar background: the brand's darkest black.
+pub const CHROME: Color32 = Color32::from_rgb(0x03, 0x03, 0x03);
+/// Card background (website `--card`).
+pub const SURFACE: Color32 = Color32::from_rgb(0x17, 0x17, 0x17);
+/// Text input and hovered-row background (website `--muted`).
+pub const SURFACE_RAISED: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+/// Card borders and separators: white at about 15% over the background.
+pub const BORDER: Color32 = Color32::from_rgb(0x2F, 0x2F, 0x2F);
+/// Primary text (website `--foreground`).
+pub const TEXT: Color32 = Color32::from_rgb(0xFA, 0xFA, 0xFA);
+/// Secondary text: labels, hints, and captions (website `--muted-foreground`).
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(0xA1, 0xA1, 0xA1);
+/// The terminal-green accent (website `--primary`): primary buttons,
+/// the selected page, and progress.
+pub const ACCENT: Color32 = Color32::from_rgb(0x51, 0xE5, 0x7E);
+/// Primary button fill while hovered, slightly deeper.
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x3F, 0xCF, 0x6B);
 /// Accent used as text or an outline on dark surfaces.
-pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0xA9, 0x9C, 0xFF);
-/// Text drawn on an [`ACCENT`] fill.
-pub const ON_ACCENT: Color32 = Color32::WHITE;
+pub const ACCENT_TEXT: Color32 = ACCENT;
+/// Text drawn on an [`ACCENT`] fill (website `--primary-foreground`).
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0x05, 0x1B, 0x0E);
+/// Background of selected text: the website's ring green, dim enough to
+/// keep [`TEXT`] readable on top.
+pub const SELECTION: Color32 = Color32::from_rgb(0x1E, 0x4D, 0x2C);
 /// Positive state: confirmed, synced, connected.
-pub const SUCCESS: Color32 = Color32::from_rgb(0x56, 0xD3, 0x64);
+pub const SUCCESS: Color32 = ACCENT;
 /// Attention state: waiting, syncing, in progress.
 pub const WARNING: Color32 = Color32::from_rgb(0xE3, 0xB3, 0x41);
-/// Error state.
-pub const DANGER: Color32 = Color32::from_rgb(0xFF, 0x7B, 0x72);
+/// Error state (website `--destructive`).
+pub const DANGER: Color32 = Color32::from_rgb(0xFF, 0x64, 0x67);
+
+/// The NULL mark and wordmark: always white on dark, per the brand rules.
+pub const BRAND_MARK: Color32 = Color32::WHITE;
+/// Side of navigation icons.
+pub const ICON_SIZE: f32 = 18.0;
+/// Width of the accent bar beside the selected page.
+pub const SELECTED_BAR_WIDTH: f32 = 3.0;
 
 /// Dark modules of a QR code; scanners expect dark on light.
 pub const QR_DARK: Color32 = Color32::BLACK;
@@ -109,7 +123,7 @@ impl Tone {
     pub const fn color(self) -> Color32 {
         match self {
             Self::Neutral => TEXT_MUTED,
-            Self::Info => ACCENT_TEXT,
+            Self::Info => TEXT,
             Self::Success => SUCCESS,
             Self::Warning => WARNING,
             Self::Danger => DANGER,
@@ -164,7 +178,7 @@ fn visuals() -> egui::Visuals {
     visuals.hyperlink_color = ACCENT_TEXT;
     visuals.warn_fg_color = WARNING;
     visuals.error_fg_color = DANGER;
-    visuals.selection.bg_fill = ACCENT;
+    visuals.selection.bg_fill = SELECTION;
     visuals.selection.stroke = Stroke::new(LINE_WIDTH, ACCENT_TEXT);
     let radius = CornerRadius::same(RADIUS_SM);
     let widgets = &mut visuals.widgets;
@@ -223,6 +237,11 @@ mod tests {
                 assert!(ratio >= AA, "{text:?} on {background:?}: {ratio}");
             }
         }
+    }
+
+    #[test]
+    fn selected_text_stays_readable() {
+        assert!(contrast(TEXT, SELECTION) >= AA);
     }
 
     #[test]

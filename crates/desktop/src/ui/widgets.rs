@@ -2,12 +2,14 @@
 //! egui widgets themselves, so every screen looks and behaves the same.
 
 use eframe::egui::{
-    self, Align, Button, CornerRadius, Frame, Layout, Margin, Response, RichText, Stroke, Ui,
+    self, Align, Align2, Button, CornerRadius, Frame, Layout, Margin, Response, RichText, Stroke,
+    Ui,
 };
 
 use zeroize::Zeroizing;
 
 use super::format::short_hash;
+use super::icons::Icon;
 use super::theme::{self, Tone};
 
 /// A page: title, one-line description, and width-limited content.
@@ -213,25 +215,54 @@ pub fn hash(ui: &mut Ui, value: &str) {
     }
 }
 
-/// A sidebar entry, left-aligned and as wide as the sidebar.
-pub fn nav_item(ui: &mut Ui, label: &str, selected: bool) -> Response {
-    let (fill, color) = if selected {
-        (theme::SURFACE_RAISED, theme::TEXT)
-    } else {
-        (egui::Color32::TRANSPARENT, theme::TEXT_MUTED)
+/// A sidebar entry: icon and label, left-aligned, as wide as the sidebar
+/// and one control high. The selected page gets a raised fill, an accent
+/// bar, and an accent icon; hovering raises the fill slightly.
+pub fn nav_item(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response {
+    let size = egui::vec2(ui.available_width(), theme::CONTROL_HEIGHT);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
+    });
+    let painter = ui.painter_at(rect);
+    let radius = CornerRadius::same(theme::RADIUS_SM);
+    let (fill, text, glyph) = match (selected, response.hovered()) {
+        (true, _) => (theme::SURFACE_RAISED, theme::TEXT, theme::ACCENT),
+        (false, true) => (theme::SURFACE, theme::TEXT, theme::TEXT),
+        (false, false) => (
+            egui::Color32::TRANSPARENT,
+            theme::TEXT_MUTED,
+            theme::TEXT_MUTED,
+        ),
     };
-    let button = Button::new(RichText::new(label).color(color))
-        .fill(fill)
-        .stroke(Stroke::NONE)
-        .min_size(egui::vec2(ui.available_width(), theme::CONTROL_HEIGHT));
-    // A row of exactly one control's height: laying out in the parent's
-    // whole remaining space would centre the item vertically in the panel.
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), theme::CONTROL_HEIGHT),
-        Layout::left_to_right(Align::Center),
-        |ui| ui.add(button),
-    )
-    .inner
+    painter.rect_filled(rect, radius, fill);
+    if selected {
+        let bar = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.top() + theme::SPACE_SM),
+            egui::vec2(
+                theme::SELECTED_BAR_WIDTH,
+                rect.height() - 2.0 * theme::SPACE_SM,
+            ),
+        );
+        painter.rect_filled(bar, CornerRadius::same(2), theme::ACCENT);
+    }
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            rect.left() + theme::SPACE_MD + theme::ICON_SIZE / 2.0,
+            rect.center().y,
+        ),
+        egui::Vec2::splat(theme::ICON_SIZE),
+    );
+    icon.paint(&painter, icon_rect, glyph);
+    painter.text(
+        egui::pos2(icon_rect.right() + theme::SPACE_MD, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(theme::BODY_SIZE),
+        text,
+    );
+    response
 }
 
 /// Minimum size of a button: content width, comfortable height.
@@ -340,7 +371,7 @@ mod tests {
                 .exact_width(theme::SIDEBAR_WIDTH)
                 .show(ctx, |ui| {
                     for label in ["Overview", "Receive", "Send", "Activity", "Node"] {
-                        rects.push(nav_item(ui, label, label == "Send").rect);
+                        rects.push(nav_item(ui, Icon::Send, label, label == "Send").rect);
                     }
                 });
         });
