@@ -1,0 +1,84 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds nulld, null-wallet-rpc, and null-desktop
+# for Linux, Windows, and macOS (Apple silicon and Intel) on native runners,
+# and publishes them as a GitHub release with SHA256SUMS. Running it by hand
+# builds the same archives as workflow artifacts without a release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built through Zig so the binaries need only glibc 2.28.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            zig: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install Zig and cargo-zigbuild
+        if: matrix.zig
+        run: pip install ziglang cargo-zigbuild
+      - name: Build and pack
+        shell: bash
+        run: scripts/dist.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: null-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum null-* > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: null-release
+          path: dist/*
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY"
+          --title "NULL $GITHUB_REF_NAME"
+          --generate-notes

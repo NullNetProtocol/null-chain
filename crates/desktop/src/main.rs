@@ -1,5 +1,8 @@
 //! Native desktop entry point. The GUI owns the main thread; a Tokio runtime
 //! runs the node, wallet, and RPC on worker threads in this same process.
+// Release builds on Windows are GUI programs: without this, Windows opens an
+// empty console window beside the app. Debug builds keep it for logs.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![cfg_attr(
     test,
     allow(

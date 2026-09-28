@@ -23,6 +23,10 @@ build: ## Debug build of the whole workspace
 release: ## Optimized build of the nulld binary
 	$(CARGO) build --release -p null-node
 
+.PHONY: dist
+dist: ## Release archives for Linux and Windows in dist/ (make dist ARGS=<target> for others; see scripts/dist.sh)
+	./scripts/dist.sh $(ARGS)
+
 .PHONY: doc
 doc: ## Build the docs without dependencies
 	$(CARGO) doc --workspace --no-deps

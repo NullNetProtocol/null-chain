@@ -70,6 +70,23 @@ elsewhere on Windows, choose a folder other users cannot read. The
 `Makefile`, `scripts/`, and `deploy/` helpers are Unix shell; on Windows,
 run the `cargo` commands directly.
 
+## Release builds
+
+`make dist` builds `nulld`, `null-wallet-rpc`, and `null-desktop` for
+Linux and Windows and packs them into `dist/`, one archive per platform
+plus `SHA256SUMS`. It needs `cargo-zigbuild` and Zig, which install
+without root: `pip install --user ziglang cargo-zigbuild`. Through Zig, the
+Linux binaries need only glibc 2.28 (distributions from 2018 on), and
+Windows needs no MinGW. `make dist ARGS=<target>` builds other targets the
+host supports.
+
+macOS builds need Apple's SDK, which in practice means a Mac. Pushing a
+tag like `v0.1.0` runs `.github/workflows/release.yml`, which builds all
+platforms on native runners (Linux, Windows, and macOS on both Apple
+silicon and Intel) with the same script and publishes a GitHub release.
+Running the workflow by hand builds the archives without publishing.
+Binaries are not code-signed yet.
+
 ## Run a local testnet
 
 The native desktop scaffold runs the full node, wallet, and authenticated
