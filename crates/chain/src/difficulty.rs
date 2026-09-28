@@ -10,8 +10,9 @@
 //! Solve times are clamped to `[1, 6T]` so one wild timestamp cannot swing
 //! the target far, and the result never exceeds the proof-of-work limit.
 
-// `U256` arithmetic on targets: sums are pre-divided by the window and the
-// product is checked, so nothing here overflows or divides by zero.
+// `U256` arithmetic on targets: sums are pre-divided by the window, the
+// product is checked and its fallback saturates, and divisors are at least
+// one, so nothing here overflows or divides by zero.
 #![allow(clippy::arithmetic_side_effects)]
 
 use crate::params::ChainParams;
@@ -56,8 +57,12 @@ pub fn next_target(params: &ChainParams, history: &[Sample]) -> Target {
     }
     let n64 = u64::try_from(n).unwrap_or(u64::MAX);
     let denominator = U256::from(t.saturating_mul(n64).saturating_mul(n64.saturating_add(1)) / 2);
+    // Exact when the product fits. Otherwise divide first; that can still
+    // overflow when the limit is near 2^256 (the test network's is about
+    // 2^255), and saturating is exact there because the result is clamped
+    // to the limit below. Mainnet's limit (about 2^243) never reaches it.
     let next = sum_targets.checked_mul(U256::from(weighted)).map_or_else(
-        || (sum_targets / denominator) * U256::from(weighted),
+        || (sum_targets / denominator).saturating_mul(U256::from(weighted)),
         |x| x / denominator,
     );
     normalize(Target::from_u256(
@@ -148,5 +153,54 @@ mod tests {
             s
         });
         assert_eq!(clamped, six_times, "60 s solve time is the clamp at 6T");
+    }
+
+    /// The slowest history the rule accepts: every solve clamped to 6T and
+    /// every target at the limit, maximising both factors of the product.
+    fn slowest_at_the_limit(p: &ChainParams) -> Vec<Sample> {
+        history(
+            p.block_interval.saturating_mul(6),
+            p.pow_limit,
+            p.difficulty_window + 1,
+        )
+    }
+
+    #[test]
+    fn slow_blocks_at_the_limit_stay_at_the_limit_on_every_network() {
+        // The test network's limit is near 2^255, so the weighted product
+        // overflows even after dividing by the denominator first.
+        for p in [ChainParams::test(), ChainParams::mainnet()] {
+            let history = slowest_at_the_limit(&p);
+            assert_eq!(next_target(&p, &history), p.pow_limit);
+        }
+    }
+
+    proptest::proptest! {
+        /// Any history, on either network, yields a target in `[1, limit]`
+        /// that survives the compact roundtrip, and never panics.
+        #[test]
+        fn any_history_yields_a_valid_target(
+            mainnet: bool,
+            solves in proptest::collection::vec(0u64..10_000, 0..80),
+            targets in proptest::collection::vec(proptest::array::uniform4(proptest::num::u64::ANY), 80),
+        ) {
+            let p = if mainnet { ChainParams::mainnet() } else { ChainParams::test() };
+            let limit = p.pow_limit.as_u256();
+            let mut timestamp = 1_000u64;
+            let history: Vec<Sample> = solves
+                .iter()
+                .zip(&targets)
+                .map(|(solve, words)| {
+                    timestamp = timestamp.saturating_add(*solve);
+                    // Real headers carry targets at or below the limit.
+                    let target = (U256(*words) % limit).max(U256::one());
+                    Sample { timestamp, target: Target::from_u256(target) }
+                })
+                .collect();
+            let next = next_target(&p, &history);
+            proptest::prop_assert!(next.as_u256() >= U256::one());
+            proptest::prop_assert!(next <= p.pow_limit);
+            proptest::prop_assert_eq!(Target::from_compact(next.to_compact()).unwrap(), next);
+        }
     }
 }

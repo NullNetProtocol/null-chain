@@ -1023,3 +1023,24 @@ without making users retype all 24. The answers are compared in constant
 time and live in zeroizing buffers. Idle auto-lock is a GUI concern
 configured in `null.conf`. It never interrupts a running backend request
 or the phrase backup.
+
+## 2026-09-28: Saturating fallback in the difficulty rule
+
+`next_target` computes `sum_targets * weighted / denominator`. When that
+product overflows `U256`, it divides first. That fallback multiplied
+unchecked. With every target at the test network's limit (about 2^255) and
+solve times clamped high, it overflowed too, and `uint` panics on
+overflow. Slow CI runners mining test blocks hit this. Mainnet's limit
+(about 2^243) keeps the fallback under 2^246, so mainnet was not affected.
+
+The fallback now saturates. This does not fork the rule: saturating and
+exact multiplication agree whenever the product fits, and when it does not,
+the exact value exceeds 2^256 and is clamped to the limit either way.
+Only histories that used to crash a node now produce a target, the limit.
+A regression test covers the slowest history on both networks, and a
+property test over random histories and targets on both networks, which
+found the same overflow independently, checks every result is in
+`[1, limit]` and survives the compact roundtrip. Alternatives considered:
+widening to `U512`, which is exact but adds a type for a case the clamp
+already settles; and lowering the test network's limit, which changes its
+genesis and every existing test chain.

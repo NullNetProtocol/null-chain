@@ -86,7 +86,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Solver with flat tables, counting sort and parent references (2.1 GB, 15 s single-thread at mainnet parameters)
 - [x] Solver tables repacked: 144,5 peaks at 1.80 GB, near the 1.5 GB floor of known solvers for collision width 24
 - [x] Solver and verifier cross-tests against the `equihash` crate under Zcash personalization for `(96, 5)`
-- [x] Difficulty adjustment (LWMA), compact-normalized, clamped solve times
+- [x] Difficulty adjustment (LWMA), compact-normalized, clamped solve times; overflow-free for any history on both networks, property-tested (2026-09-28)
 - [x] Storage backend on `redb`: blocks, height index, nullifier set, per-height frontier, tip; atomic apply and revert
 - [x] Nullifier set as a `redb` B-tree table (point lookups)
 - [x] Nullifier lookups measured at 0.66 us each at one million entries; no bloom filter needed

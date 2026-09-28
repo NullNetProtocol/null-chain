@@ -22,6 +22,7 @@ tempfile.workspace = true
 equihash.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true
