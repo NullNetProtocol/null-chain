@@ -107,7 +107,9 @@ answer buffers are zeroized.
 
 An unlocked wallet locks itself after `lock_after_minutes` without keyboard
 or pointer input (15 by default; 0 disables it). The lock is skipped while
-a backend request is running or the recovery phrase is on screen.
+a backend request is running or the recovery phrase is on screen. It is
+also skipped while the miner runs, because locking would stop mining; the
+timeout starts again once mining stops. Lock by hand to stop both.
 
 ## Mining
 
@@ -117,6 +119,10 @@ unlocked wallet and always pays the wallet's main address, the one at
 index 0. While the wallet is locked the switch is disabled. Locking stops
 the miner, and a saved `mine = true` starts it again on the next unlock.
 Moving the slider while mining restarts the miner with the new count.
+Stopping takes at most one proof-of-work solve (seconds on the main
+network) and happens in the background, so the switch answers at once.
+Workers also drop their template as soon as the best tip moves, instead of
+grinding on a block that could only become a side-chain block.
 
 The switch saves `mine` and `mining_threads` to `null.conf` in place;
 other settings and comments are kept. The first start builds the coinbase

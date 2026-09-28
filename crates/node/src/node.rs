@@ -26,7 +26,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_core::RngCore;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::config::{Config, MEMPOOL_CAPACITY, OUTBOUND_TARGET};
@@ -320,6 +320,8 @@ pub struct Node {
     max_inbound: usize,
     pending_blocks: HashMap<BlockHash, PendingBlock>,
     next_id: PeerId,
+    /// The best tip's hash, watched by miners.
+    tip: watch::Sender<BlockHash>,
     /// Version nonces of our outbound connections still handshaking. Each
     /// connection gets its own, so peers cannot link our connections by it,
     /// and an inbound version carrying one is our own dial come back.
@@ -338,6 +340,7 @@ pub struct Node {
 /// A running node.
 pub struct Handle {
     events: mpsc::Sender<Event>,
+    tip: watch::Sender<BlockHash>,
     /// Where the node accepts peers, if listening.
     pub listen_addr: Option<SocketAddr>,
     /// Where the control socket listens, if enabled.
@@ -364,6 +367,11 @@ impl Handle {
             .await
             .map_err(|_| Error::Stopped)?;
         response.await.map_err(|_| Error::Stopped)
+    }
+
+    /// Follows the best tip's hash, for miners that must drop stale work.
+    pub fn tip(&self) -> watch::Receiver<BlockHash> {
+        self.tip.subscribe()
     }
 
     /// The event sender, for tasks that feed the loop.
@@ -394,6 +402,7 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         None => None,
     };
     let (events, receiver) = mpsc::channel(4_096);
+    let tip = watch::Sender::new(chain.tip()?.hash);
 
     let listen_addr = match bind(config.listen).await? {
         Some((listener, local)) => {
@@ -411,10 +420,15 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         None => None,
     };
     if let Some(miner) = config.mine_to {
-        let miner_events = events.clone();
-        let threads = config.mining_threads;
+        let miner = crate::miner::start(
+            miner,
+            params,
+            config.mining_threads,
+            events.clone(),
+            tip.subscribe(),
+        );
         tasks.spawn(async move {
-            if let Err(error) = crate::miner::run(miner, params, threads, miner_events).await {
+            if let Err(error) = miner.wait().await {
                 logging::warn(&format!("miner stopped: {error}"));
             }
         });
@@ -450,6 +464,7 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         pending_blocks: HashMap::new(),
         next_id: 1,
         handshakes: HashMap::new(),
+        tip: tip.clone(),
         rng,
         events: events.clone(),
         genesis,
@@ -461,6 +476,7 @@ pub async fn spawn(config: Config) -> Result<Handle> {
     let task = tokio::spawn(node.run(receiver));
     Ok(Handle {
         events,
+        tip,
         listen_addr,
         rpc_addr,
         rpc_http_addr,
@@ -989,7 +1005,7 @@ impl Node {
                     block.transactions().len()
                 ));
                 self.announce_block(block, from);
-                self.notify_block(hash);
+                self.tip_moved(hash);
             }
             Ok(Import::Reorganized { reverted, applied }) => {
                 if from.is_none() {
@@ -1003,7 +1019,7 @@ impl Node {
                     .readmit(&reverted, self.chain.store(), &self.params)?;
                 self.evict_mined_since(applied)?;
                 self.announce_block(block, from);
-                self.notify_block(hash);
+                self.tip_moved(hash);
             }
             Ok(Import::SideChain | Import::AlreadyKnown) => {}
             Err(null_chain::Error::Orphan) => {
@@ -1022,6 +1038,13 @@ impl Node {
             self.continue_sync(id);
         }
         Ok(submission)
+    }
+
+    /// Publishes a new best tip: to miners, so they drop work on the old
+    /// one, and to the block-notify command.
+    fn tip_moved(&self, hash: BlockHash) {
+        self.tip.send_replace(hash);
+        self.notify_block(hash);
     }
 
     /// Runs the block-notify command, if configured, with the new tip's

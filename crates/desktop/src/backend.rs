@@ -340,7 +340,13 @@ impl State {
             .ok_or_else(|| Error::Argument("unlock your wallet to mine".into()))?;
         let payout = service.daemon.wallet().keys().default_address()?;
         let params = self.network.params();
-        self.miner = Some(miner::start(payout, params, threads, self.node.events()));
+        self.miner = Some(miner::start(
+            payout,
+            params,
+            threads,
+            self.node.events(),
+            self.node.tip(),
+        ));
         Ok(())
     }
 

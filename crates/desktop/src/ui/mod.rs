@@ -172,7 +172,9 @@ impl App {
     /// Records input and locks an unlocked wallet left idle too long.
     fn check_idle(&mut self, ctx: &egui::Context, state: &Snapshot) {
         let now = Instant::now();
-        if ctx.input(|i| !i.events.is_empty() || i.pointer.is_moving()) {
+        // Mining pays this wallet and stops when it locks, so a mining
+        // wallet counts as in use; the timeout restarts once mining stops.
+        if ctx.input(|i| !i.events.is_empty() || i.pointer.is_moving()) || mining_active(state) {
             self.idle.touch(now);
         }
         if self.can_lock(state) && self.idle.expired(now) {
@@ -259,6 +261,11 @@ impl App {
         }
         route(self.page, &mut self.screens, ui, state, &self.paths)
     }
+}
+
+/// Whether the built-in miner is running.
+fn mining_active(state: &Snapshot) -> bool {
+    format::field(&state.mining, "active").as_bool() == Some(true)
 }
 
 /// Draws the page for the current wallet state; locked wallets see setup.
@@ -422,5 +429,21 @@ mod tests {
             });
         });
         assert!(!dismissed);
+    }
+
+    #[test]
+    fn only_a_running_miner_counts_as_mining() {
+        assert!(mining_active(&populated()));
+        for mining in [
+            json!(null),
+            json!({ "active": false }),
+            json!({ "enabled": true }),
+        ] {
+            let state = Snapshot {
+                mining,
+                ..Snapshot::default()
+            };
+            assert!(!mining_active(&state));
+        }
     }
 }

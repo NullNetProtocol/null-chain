@@ -28,7 +28,9 @@ async fn a_miner_started_at_runtime_mines_and_stops_cleanly() {
     let node = spawn(Config::test()).await.unwrap();
     assert_eq!(mined(&node).await, (0, 0), "nothing mines until started");
 
-    let running = miner::start(payout, Network::Test.params(), 2, node.events());
+    let tip = node.tip();
+    let genesis = *tip.borrow();
+    let running = miner::start(payout, Network::Test.params(), 2, node.events(), node.tip());
     assert_eq!((running.payout, running.threads), (payout, 2));
     tokio::time::timeout(Duration::from_secs(300), async {
         while mined(&node).await.1 == 0 {
@@ -38,6 +40,7 @@ async fn a_miner_started_at_runtime_mines_and_stops_cleanly() {
     .await
     .expect("a block within five minutes on the test network");
 
+    assert_ne!(*tip.borrow(), genesis, "the tip watch follows mined blocks");
     running.stop().await.unwrap();
     let after_stop = mined(&node).await;
     tokio::time::sleep(Duration::from_secs(3)).await;

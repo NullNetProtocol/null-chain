@@ -7,7 +7,7 @@ use null_chain::target::Target;
 use null_circuit::proof::ProvingKey;
 use null_protocol::address::Address;
 use null_protocol::amount::Amount;
-use null_protocol::block::{tx_root, Block, BlockHeader, PowSolution};
+use null_protocol::block::{tx_root, Block, BlockHash, BlockHeader, PowSolution};
 use null_protocol::builder::{Builder, OutputInfo};
 use null_protocol::consensus::{next_height, subsidy, BLOCK_VERSION};
 use null_protocol::memo::Memo;
@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use null_storage::tree::CommitmentTree;
 use rand_core::{CryptoRng, RngCore};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::node::Event;
@@ -142,7 +142,9 @@ impl Template {
 }
 
 /// A running miner. Once stopped, workers finish the nonce they are
-/// solving (seconds on the main network) and exit.
+/// solving (seconds on the main network) and exit. They also drop a
+/// template as soon as the best tip moves past its parent, since a block
+/// on a stale parent could only become a side-chain block.
 pub struct Miner {
     stop: Arc<AtomicBool>,
     task: JoinHandle<Result<()>>,
@@ -182,6 +184,7 @@ pub fn start(
     params: ChainParams,
     threads: usize,
     events: mpsc::Sender<Event>,
+    tip: watch::Receiver<BlockHash>,
 ) -> Miner {
     let threads = threads.max(1);
     let stop = Arc::new(AtomicBool::new(false));
@@ -200,6 +203,7 @@ pub fn start(
                     pow,
                     pk: Arc::clone(&pk),
                     stop: Arc::clone(&flag),
+                    tip: tip.clone(),
                 };
                 tokio::spawn(worker.run(events.clone()))
             })
@@ -217,18 +221,10 @@ pub fn start(
     }
 }
 
-/// Mines until the node loop is gone, as `nulld run --mine` does.
-///
-/// # Errors
-/// Returns [`Error::Stopped`] when the node loop is gone, or a proving or
-/// building error.
-pub async fn run(
-    miner: Address,
-    params: ChainParams,
-    threads: usize,
-    events: mpsc::Sender<Event>,
-) -> Result<()> {
-    start(miner, params, threads, events).wait().await
+/// Whether a worker should try another nonce on a template built on
+/// `parent`: it has not been stopped, and `parent` is still the best tip.
+fn worth_mining(stop: &AtomicBool, tip: &watch::Receiver<BlockHash>, parent: BlockHash) -> bool {
+    !stop.load(Ordering::Relaxed) && *tip.borrow() == parent
 }
 
 /// What one worker needs.
@@ -237,6 +233,7 @@ struct Worker {
     pow: EquihashPow,
     pk: Arc<ProvingKey>,
     stop: Arc<AtomicBool>,
+    tip: watch::Receiver<BlockHash>,
 }
 
 impl Worker {
@@ -253,13 +250,17 @@ impl Worker {
                 return Err(Error::Stopped);
             };
             let (payout, pow, pk) = (self.payout, self.pow, Arc::clone(&self.pk));
-            let stop = Arc::clone(&self.stop);
+            let (stop, tip, parent) = (
+                Arc::clone(&self.stop),
+                self.tip.clone(),
+                template.parent.hash(),
+            );
             // Proving and solving are CPU-bound; run them on the blocking pool
             // so many workers use many cores without starving the runtime.
             let found = tokio::task::spawn_blocking(move || {
                 let mut rng = rand::rngs::OsRng;
                 template.mine(&payout, pk.as_ref(), &pow, &mut rng, || {
-                    !stop.load(Ordering::Relaxed)
+                    worth_mining(&stop, &tip, parent)
                 })
             })
             .await
@@ -273,5 +274,27 @@ impl Worker {
             tokio::task::yield_now().await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_continues_only_while_unstopped_and_on_the_best_tip() {
+        let (a, b) = (
+            BlockHash::from_bytes([1; 32]),
+            BlockHash::from_bytes([2; 32]),
+        );
+        let (tip, watched) = watch::channel(a);
+        let stop = AtomicBool::new(false);
+        assert!(worth_mining(&stop, &watched, a));
+        assert!(!worth_mining(&stop, &watched, b), "built on a stale parent");
+        tip.send_replace(b);
+        assert!(!worth_mining(&stop, &watched, a), "the tip moved on");
+        assert!(worth_mining(&stop, &watched, b));
+        stop.store(true, Ordering::Relaxed);
+        assert!(!worth_mining(&stop, &watched, b), "stopped");
     }
 }
