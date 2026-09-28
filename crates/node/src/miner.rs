@@ -12,11 +12,13 @@ use null_protocol::builder::{Builder, OutputInfo};
 use null_protocol::consensus::{next_height, subsidy, BLOCK_VERSION};
 use null_protocol::memo::Memo;
 use null_protocol::transaction::Transaction;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use null_storage::tree::CommitmentTree;
 use rand_core::{CryptoRng, RngCore};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::node::Event;
 use crate::{Error, Result};
@@ -134,68 +136,134 @@ impl Template {
     }
 }
 
-/// Mines on `threads` cores: builds the proving key once, then runs that
-/// many independent workers. Each worker fetches its own template and
-/// mines from a random nonce, so they explore disjoint nonce ranges with
-/// overwhelming probability and their throughput adds up.
+/// A running miner. Workers finish their current attempt, at most
+/// a few dozen nonces, and exit once it is stopped.
+pub struct Miner {
+    stop: Arc<AtomicBool>,
+    task: JoinHandle<Result<()>>,
+    /// Where coinbase rewards go.
+    pub payout: Address,
+    /// Worker threads.
+    pub threads: usize,
+}
+
+impl Miner {
+    /// Stops the workers and waits for them.
+    ///
+    /// # Errors
+    /// Returns a failure that stopped a worker before it was asked to.
+    pub async fn stop(self) -> Result<()> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.task.await.map_err(|_| Error::Stopped)?
+    }
+
+    /// Waits for the workers without stopping them: until the node loop is
+    /// gone, or a worker fails.
+    ///
+    /// # Errors
+    /// Returns the first worker failure.
+    pub async fn wait(self) -> Result<()> {
+        self.task.await.map_err(|_| Error::Stopped)?
+    }
+}
+
+/// Starts `threads` workers (at least one) mining to `payout` against the
+/// node loop behind `events`. The proving key for the coinbase is built
+/// once first, which takes a few seconds. Each worker fetches its own
+/// template and mines from a random nonce, so workers explore disjoint
+/// nonce ranges with overwhelming probability and their throughput adds up.
+pub fn start(
+    payout: Address,
+    params: ChainParams,
+    threads: usize,
+    events: mpsc::Sender<Event>,
+) -> Miner {
+    let threads = threads.max(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let task = tokio::spawn(async move {
+        let pk = Arc::new(
+            tokio::task::spawn_blocking(ProvingKey::build)
+                .await
+                .map_err(|_| Error::Stopped)??,
+        );
+        let pow = EquihashPow::new(params.equihash);
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                let worker = Worker {
+                    payout,
+                    pow,
+                    pk: Arc::clone(&pk),
+                    stop: Arc::clone(&flag),
+                };
+                tokio::spawn(worker.run(events.clone()))
+            })
+            .collect();
+        for worker in workers {
+            worker.await.map_err(|_| Error::Stopped)??;
+        }
+        Ok(())
+    });
+    Miner {
+        stop,
+        task,
+        payout,
+        threads,
+    }
+}
+
+/// Mines until the node loop is gone, as `nulld run --mine` does.
 ///
 /// # Errors
-/// Returns [`Error::Stopped`] when the node loop is gone, or a proving
-/// or building error.
+/// Returns [`Error::Stopped`] when the node loop is gone, or a proving or
+/// building error.
 pub async fn run(
     miner: Address,
     params: ChainParams,
     threads: usize,
     events: mpsc::Sender<Event>,
 ) -> Result<()> {
-    let pk = Arc::new(
-        tokio::task::spawn_blocking(ProvingKey::build)
-            .await
-            .map_err(|_| Error::Stopped)??,
-    );
-    let pow = EquihashPow::new(params.equihash);
-    let workers: Vec<_> = (0..threads.max(1))
-        .map(|_| tokio::spawn(mine_loop(miner, pow, Arc::clone(&pk), events.clone())))
-        .collect();
-    // Every worker runs until the node loop is gone, when they all stop.
-    for worker in workers {
-        worker.await.map_err(|_| Error::Stopped)??;
-    }
-    Ok(())
+    start(miner, params, threads, events).wait().await
 }
 
-/// One worker: fetch a template, mine it on the blocking pool, submit any
-/// block found, repeat.
-async fn mine_loop(
-    miner: Address,
+/// What one worker needs.
+struct Worker {
+    payout: Address,
     pow: EquihashPow,
     pk: Arc<ProvingKey>,
-    events: mpsc::Sender<Event>,
-) -> Result<()> {
-    loop {
-        let (reply, response) = oneshot::channel();
-        events
-            .send(Event::TemplateRequest(reply))
-            .await
-            .map_err(|_| Error::Stopped)?;
-        let Ok(template) = response.await else {
-            return Err(Error::Stopped);
-        };
-        let pk = Arc::clone(&pk);
-        // Proving and solving are CPU-bound; run them on the blocking pool
-        // so many workers use many cores without starving the runtime.
-        let found = tokio::task::spawn_blocking(move || {
-            let mut rng = rand::rngs::OsRng;
-            template.mine(&miner, pk.as_ref(), &pow, &mut rng)
-        })
-        .await
-        .map_err(|_| Error::Stopped)??;
-        if let Some(block) = found {
+    stop: Arc<AtomicBool>,
+}
+
+impl Worker {
+    /// Fetches a template, mines it on the blocking pool, submits any block
+    /// found, and repeats until stopped or the node loop is gone.
+    async fn run(self, events: mpsc::Sender<Event>) -> Result<()> {
+        while !self.stop.load(Ordering::Relaxed) {
+            let (reply, response) = oneshot::channel();
             events
-                .send(Event::Mined(Box::new(block)))
+                .send(Event::TemplateRequest(reply))
                 .await
                 .map_err(|_| Error::Stopped)?;
+            let Ok(template) = response.await else {
+                return Err(Error::Stopped);
+            };
+            let (payout, pow, pk) = (self.payout, self.pow, Arc::clone(&self.pk));
+            // Proving and solving are CPU-bound; run them on the blocking pool
+            // so many workers use many cores without starving the runtime.
+            let found = tokio::task::spawn_blocking(move || {
+                let mut rng = rand::rngs::OsRng;
+                template.mine(&payout, pk.as_ref(), &pow, &mut rng)
+            })
+            .await
+            .map_err(|_| Error::Stopped)??;
+            if let Some(block) = found {
+                events
+                    .send(Event::Mined(Box::new(block)))
+                    .await
+                    .map_err(|_| Error::Stopped)?;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
+        Ok(())
     }
 }

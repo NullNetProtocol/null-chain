@@ -10,6 +10,7 @@
 
 pub mod activity;
 pub mod backup;
+pub mod mining;
 pub mod node;
 pub mod overview;
 pub mod receive;

@@ -5,12 +5,18 @@ use null_desktop::backend::Snapshot;
 use null_desktop::config::Paths;
 use serde_json::Value;
 
+use super::{mining, Effect};
 use crate::ui::format::{field, number, text};
 use crate::ui::theme::Tone;
 use crate::ui::widgets;
 
-/// Draws node status. It has no actions.
-pub fn show(ui: &mut Ui, state: &Snapshot, paths: &Paths) {
+/// Draws node status and the mining card, whose switch is its only action.
+pub fn show(
+    ui: &mut Ui,
+    state: &Snapshot,
+    paths: &Paths,
+    mining: &mut mining::Form,
+) -> Option<Effect> {
     widgets::page(
         ui,
         "Node",
@@ -27,6 +33,7 @@ pub fn show(ui: &mut Ui, state: &Snapshot, paths: &Paths) {
                 widgets::stat(height, "Height", &number(&state.node, "height"));
                 widgets::stat(connected, "Peers", &peers.to_string());
             });
+            let effect = mining.show(ui, state);
             widgets::card(ui, |ui| {
                 widgets::card_title(ui, "Best block");
                 widgets::copyable(ui, text(&state.node, "best_block_hash"));
@@ -36,8 +43,9 @@ pub fn show(ui: &mut Ui, state: &Snapshot, paths: &Paths) {
                 }
             });
             widgets::card(ui, |ui| storage(ui, paths));
+            effect
         },
-    );
+    )
 }
 
 fn storage(ui: &mut Ui, paths: &Paths) {

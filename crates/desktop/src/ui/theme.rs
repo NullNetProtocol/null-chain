@@ -45,6 +45,12 @@ pub const DANGER: Color32 = Color32::from_rgb(0xFF, 0x64, 0x67);
 
 /// The NULL mark and wordmark: always white on dark, per the brand rules.
 pub const BRAND_MARK: Color32 = Color32::WHITE;
+/// Width of an on/off switch.
+pub const TOGGLE_WIDTH: f32 = 40.0;
+/// Height of an on/off switch; its knob is a circle this tall, inset.
+pub const TOGGLE_HEIGHT: f32 = 22.0;
+/// Corner radius of an on/off switch: half its height, a full pill.
+pub const TOGGLE_RADIUS: u8 = 11;
 /// Side of navigation icons.
 pub const ICON_SIZE: f32 = 18.0;
 /// Width of the accent bar beside the selected page.

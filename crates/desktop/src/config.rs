@@ -69,6 +69,56 @@ pub struct Startup {
     pub lock_after: Option<Duration>,
 }
 
+/// Built-in miner settings, saved in `null.conf` by the mining switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mining {
+    /// Mine whenever a wallet is unlocked.
+    pub enabled: bool,
+    /// Worker threads, from 1 to [`max_mining_threads`].
+    pub threads: usize,
+}
+
+impl Mining {
+    /// These settings with `threads` clamped to what this machine has.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        Self {
+            threads: self.threads.clamp(1, max_mining_threads()),
+            ..self
+        }
+    }
+}
+
+/// Logical CPUs on this machine: the most mining threads worth running.
+pub fn max_mining_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Mining threads by default: half the CPUs, so the machine stays usable.
+fn default_mining_threads() -> usize {
+    (max_mining_threads() / 2).max(1)
+}
+
+/// Saves the mining settings into the configuration at `path`, keeping
+/// every other setting and comment as it is. The file is replaced
+/// atomically and stays owner-only on Unix.
+///
+/// # Errors
+/// Fails if the file cannot be read, parsed, or written.
+pub fn save_mining(path: &Path, mining: Mining) -> Result<()> {
+    let text = fs::read_to_string(path)?;
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| Error::Argument(format!("cannot edit {}: {error}", path.display())))?;
+    document.insert("mine", toml_edit::value(mining.enabled));
+    let threads = i64::try_from(mining.threads).unwrap_or(i64::MAX);
+    document.insert("mining_threads", toml_edit::value(threads));
+    let temporary = path.with_extension("conf.tmp");
+    write_private(&temporary, document.to_string().as_bytes())?;
+    fs::rename(&temporary, path)?;
+    Ok(())
+}
+
 /// Default idle minutes before the wallet locks itself.
 const DEFAULT_LOCK_MINUTES: u64 = 15;
 
@@ -86,6 +136,10 @@ struct Settings {
     wallet: Option<PathBuf>,
     /// Minutes without input before the GUI locks the wallet; 0 disables.
     lock_after_minutes: u64,
+    /// Mine to the wallet's main address whenever it is unlocked.
+    mine: bool,
+    /// Mining worker threads.
+    mining_threads: usize,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     wallets: BTreeMap<String, PathBuf>,
 }
@@ -100,12 +154,23 @@ impl Default for Settings {
             proxy: None,
             wallet: None,
             lock_after_minutes: DEFAULT_LOCK_MINUTES,
+            mine: false,
+            mining_threads: default_mining_threads(),
             wallets: BTreeMap::new(),
         }
     }
 }
 
 impl Settings {
+    /// The saved mining settings, clamped to this machine.
+    fn mining(&self) -> Mining {
+        Mining {
+            enabled: self.mine,
+            threads: self.mining_threads,
+        }
+        .clamped()
+    }
+
     /// The idle lock timeout, or `None` when disabled.
     fn lock_after(&self) -> Option<Duration> {
         (self.lock_after_minutes > 0).then(|| {
@@ -195,6 +260,7 @@ impl Startup {
             write_settings(&config, &settings)?;
         }
         let lock_after = settings.lock_after();
+        let mining = settings.mining();
         Ok(Self {
             backend: backend::Config {
                 node: NodeConfig {
@@ -214,6 +280,8 @@ impl Startup {
                 rpc: settings.rpc,
                 token_file: network_dir.join("desktop-rpc.token"),
                 wallet: wallet.clone(),
+                mining,
+                settings: config.clone(),
             },
             paths: Paths {
                 data,
@@ -237,12 +305,8 @@ fn read_settings(path: &Path) -> Result<(Settings, bool)> {
     }
 }
 
-fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        private_directory(parent)?;
-    }
-    let text =
-        toml::to_string_pretty(settings).map_err(|error| Error::Argument(error.to_string()))?;
+/// Creates `path`, failing if it exists, owner-only on Unix.
+fn create_private(path: &Path) -> Result<fs::File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -250,7 +314,28 @@ fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
+    Ok(options.open(path)?)
+}
+
+/// Writes `bytes` to a new owner-only file at `path`, replacing a stale one.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let mut file = create_private(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        private_directory(parent)?;
+    }
+    let text =
+        toml::to_string_pretty(settings).map_err(|error| Error::Argument(error.to_string()))?;
+    let mut file = create_private(path)?;
     file.write_all(
         b"# NULL desktop settings (TOML). Restart the app after editing.\n\
         # Never put your recovery phrase or wallet passphrase in this file.\n\
@@ -459,5 +544,50 @@ mod tests {
         }
         let (saved, _) = read_settings(&startup.paths.config).unwrap();
         assert_eq!(saved.connect, ["peer:19000"]);
+    }
+
+    #[test]
+    fn mining_settings_save_in_place_and_keep_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("null.conf");
+        fs::write(
+            &path,
+            "# keep me\nnetwork = \"main\" # inline\nmine = false\n",
+        )
+        .unwrap();
+        let mining = Mining {
+            enabled: true,
+            threads: 1,
+        };
+        save_mining(&path, mining).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("# keep me\nnetwork = \"main\" # inline\n"),
+            "{text}"
+        );
+        let (settings, _) = read_settings(&path).unwrap();
+        assert_eq!(settings.mining(), mining);
+        assert!(!path.with_extension("conf.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(save_mining(&dir.path().join("missing.conf"), mining).is_err());
+    }
+
+    #[test]
+    fn mining_threads_are_clamped_to_this_machine() {
+        let max = max_mining_threads();
+        for (asked, got) in [(0, 1), (1, 1), (max, max), (max + 100, max)] {
+            let mining = Mining {
+                enabled: true,
+                threads: asked,
+            };
+            assert_eq!(mining.clamped().threads, got, "{asked}");
+        }
+        assert!(!Settings::default().mine, "mining is opt-in");
+        assert!((1..=max).contains(&Settings::default().mining().threads));
     }
 }

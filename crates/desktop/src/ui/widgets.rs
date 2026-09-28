@@ -265,6 +265,49 @@ pub fn nav_item(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Respons
     response
 }
 
+/// An on/off switch. Returns its response; the caller flips the state on
+/// click, so the switch always shows what the backend reports.
+pub fn toggle(ui: &mut Ui, on: bool, enabled: bool) -> Response {
+    let size = egui::vec2(theme::TOGGLE_WIDTH, theme::TOGGLE_HEIGHT);
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, ""));
+    let t = ui.ctx().animate_bool_responsive(response.id, on);
+    let fill = if !enabled {
+        theme::SURFACE
+    } else if on {
+        theme::ACCENT
+    } else {
+        theme::SURFACE_RAISED
+    };
+    let radius = rect.height() / 2.0;
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        CornerRadius::same(theme::TOGGLE_RADIUS),
+        fill,
+        Stroke::new(theme::LINE_WIDTH, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    let knob_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
+    let knob = if on && enabled {
+        theme::ON_ACCENT
+    } else {
+        theme::TEXT_MUTED
+    };
+    painter.circle_filled(egui::pos2(knob_x, rect.center().y), radius - 3.0, knob);
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
+}
+
 /// Minimum size of a button: content width, comfortable height.
 fn control_size() -> egui::Vec2 {
     egui::vec2(0.0, theme::CONTROL_HEIGHT)

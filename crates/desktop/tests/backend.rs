@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use null_chain::genesis::genesis;
 use null_desktop::backend::{Action, Backend, Config, OpenMode};
-use null_desktop::config::{Args, Startup};
+use null_desktop::config::{Args, Mining, Startup};
 use null_node::config::{Config as NodeConfig, Network};
 use null_node::jsonrpc::{Dispatch, Params, REJECTED};
 use null_node::rpc::Token;
@@ -64,6 +64,11 @@ async fn gui_and_http_share_one_wallet_and_lock_releases_its_database() {
         rpc: "127.0.0.1:0".parse().unwrap(),
         token_file: token_file.clone(),
         wallet: path.clone(),
+        mining: Mining {
+            enabled: false,
+            threads: 1,
+        },
+        settings: directory.path().join("null.conf"),
     });
     let addr = ready(&mut backend).await;
     let token = Token::from_file(token_file).unwrap();
@@ -236,6 +241,11 @@ async fn desktop_rejects_public_rpc_before_starting_a_node() {
         rpc: "0.0.0.0:0".parse().unwrap(),
         token_file: directory.path().join("token"),
         wallet: directory.path().join("wallet.redb"),
+        mining: Mining {
+            enabled: false,
+            threads: 1,
+        },
+        settings: directory.path().join("null.conf"),
     });
     assert!(backend.shutdown().await.is_err());
     assert!(!directory.path().join("token").exists());
@@ -329,5 +339,81 @@ async fn automatic_setup_recognizes_the_wallet_after_restart_and_import_restores
     assert_eq!(default_address(&backend).await, address);
     assert!(backend.snapshots.borrow().wallet_present);
     assert!(imported_path.is_file());
+    backend.shutdown().await.unwrap();
+}
+
+/// Waits until the published mining state satisfies `done`.
+async fn mining_until(backend: &mut Backend, done: impl Fn(&Value) -> bool) -> Value {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            {
+                let mining = backend.snapshots.borrow().mining.clone();
+                if done(&mining) {
+                    return mining;
+                }
+            }
+            backend.snapshots.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap()
+}
+
+async fn set_mining(backend: &Backend, enabled: bool, threads: usize) -> Result<String, String> {
+    backend
+        .client
+        .submit(Action::SetMining(Mining { enabled, threads }))
+        .unwrap()
+        .await
+        .unwrap()
+        .map(|outcome| outcome.message)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mining_needs_a_wallet_pays_its_main_address_and_follows_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let startup = setup(&dir.path().join("data"));
+    let config = startup.paths.config;
+    let comment = "# my own note\n";
+    let saved = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{comment}{saved}")).unwrap();
+    let mut backend = Backend::spawn(startup.backend);
+    ready(&mut backend).await;
+
+    assert!(
+        set_mining(&backend, true, 1).await.is_err(),
+        "locked wallets cannot mine"
+    );
+    assert_eq!(backend.snapshots.borrow().mining["active"], false);
+
+    open(&backend, OpenMode::Create).await;
+    let address = default_address(&backend).await;
+    set_mining(&backend, true, 1).await.unwrap();
+    let mining = mining_until(&mut backend, |m| m["active"] == true).await;
+    assert_eq!(mining["payout"], address, "rewards go to the main address");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.starts_with(comment), "the user's comments survive");
+    assert!(text.contains("mine = true") && text.contains("mining_threads = 1"));
+
+    backend
+        .client
+        .submit(Action::Lock)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    mining_until(&mut backend, |m| {
+        m["active"] == false && m["enabled"] == true
+    })
+    .await;
+
+    // The saved choice resumes on the next unlock.
+    open(&backend, OpenMode::Existing).await;
+    mining_until(&mut backend, |m| m["active"] == true).await;
+    set_mining(&backend, false, 1).await.unwrap();
+    mining_until(&mut backend, |m| m["active"] == false).await;
+    assert!(std::fs::read_to_string(&config)
+        .unwrap()
+        .contains("mine = false"));
     backend.shutdown().await.unwrap();
 }

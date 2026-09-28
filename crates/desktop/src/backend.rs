@@ -10,7 +10,8 @@ use std::time::Duration;
 use null_chain::genesis::genesis;
 use null_node::config::{Config as NodeConfig, Network};
 use null_node::jsonrpc::{self, Context, Dispatch, Params, RpcError, REJECTED};
-use null_node::node;
+use null_node::miner::{self, Miner};
+use null_node::node::{self, Request, Response};
 use null_node::rpc::{Source, Token};
 use null_node::walletd::{self, Service, ServiceConfig};
 use null_node::{Error, Result};
@@ -22,6 +23,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+use crate::config::{self, Mining};
+
 /// Desktop configuration; the node has no separate control socket.
 pub struct Config {
     /// Embedded node settings.
@@ -32,6 +35,10 @@ pub struct Config {
     pub token_file: PathBuf,
     /// Automatically selected wallet file, shared by create, import, and unlock.
     pub wallet: PathBuf,
+    /// Saved mining settings; mining starts on unlock when enabled.
+    pub mining: Mining,
+    /// The configuration file the mining switch saves to.
+    pub settings: PathBuf,
 }
 
 /// How to open a wallet.
@@ -55,6 +62,10 @@ pub enum Action {
     },
     /// Finish the active payment pass and release wallet keys.
     Lock,
+    /// Turn the built-in miner on or off, or change its threads. Mining
+    /// needs an unlocked wallet and always pays its main (index 0) address.
+    /// The choice is saved and resumes on the next unlock.
+    SetMining(Mining),
     /// Invoke a method on the same services used by HTTP RPC.
     Call {
         /// RPC method name.
@@ -105,6 +116,9 @@ pub struct Snapshot {
     pub operations: Value,
     /// Received notes, including spent notes.
     pub received: Value,
+    /// Built-in miner: saved choice, whether it runs, threads, payout
+    /// address, and blocks found and in the main chain.
+    pub mining: Value,
     /// Startup or refresh error.
     pub error: Option<String>,
 }
@@ -207,6 +221,9 @@ struct State {
     network: Network,
     wallet: Option<Service>,
     wallet_path: PathBuf,
+    miner: Option<Miner>,
+    mining: Mining,
+    settings: PathBuf,
 }
 
 async fn run(
@@ -251,6 +268,9 @@ async fn run(
         network,
         wallet: None,
         wallet_path: config.wallet,
+        miner: None,
+        mining: config.mining.clamped(),
+        settings: config.settings,
     };
     let server = tokio::spawn(jsonrpc::serve_with(listener, token, client));
     let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -292,9 +312,56 @@ async fn run(
 
 impl State {
     async fn lock(&mut self) {
+        // The miner pays the wallet's address, so it stops with the wallet.
+        self.stop_mining().await;
         if let Some(service) = self.wallet.take() {
             service.shutdown().await;
         }
+    }
+
+    async fn stop_mining(&mut self) {
+        if let Some(miner) = self.miner.take() {
+            if let Err(error) = miner.stop().await {
+                null_node::logging::warn(&format!("miner stopped: {error}"));
+            }
+        }
+    }
+
+    /// Starts the miner for the unlocked wallet's main address.
+    fn start_mining(&mut self, threads: usize) -> Result<()> {
+        let service = self
+            .wallet
+            .as_ref()
+            .ok_or_else(|| Error::Argument("unlock your wallet to mine".into()))?;
+        let payout = service.daemon.wallet().keys().default_address()?;
+        let params = self.network.params();
+        self.miner = Some(miner::start(payout, params, threads, self.node.events()));
+        Ok(())
+    }
+
+    /// Applies and saves a mining choice. Mining keeps its new state even
+    /// if saving fails; the message says so.
+    async fn set_mining(&mut self, mining: Mining) -> Result<Outcome> {
+        let mining = mining.clamped();
+        if mining.enabled && self.wallet.is_none() {
+            return Err(Error::Argument("unlock your wallet to mine".into()));
+        }
+        self.stop_mining().await;
+        if mining.enabled {
+            self.start_mining(mining.threads)?;
+        }
+        self.mining = mining;
+        let message = if mining.enabled {
+            format!("Mining with {} threads", mining.threads)
+        } else {
+            "Mining stopped".into()
+        };
+        Ok(Outcome::message(
+            match config::save_mining(&self.settings, mining) {
+                Ok(()) => message,
+                Err(error) => format!("{message}, but saving null.conf failed: {error}"),
+            },
+        ))
     }
 
     async fn action(&mut self, action: Action) -> Result<Outcome> {
@@ -321,11 +388,15 @@ impl State {
                     sync_interval: Duration::from_secs(1),
                     light: false,
                 }));
+                if self.mining.enabled {
+                    self.start_mining(self.mining.threads)?;
+                }
                 Ok(Outcome {
                     phrase,
                     ..Outcome::message("Wallet unlocked")
                 })
             }
+            Action::SetMining(mining) => self.set_mining(mining).await,
             Action::Call { method, params } => {
                 let result = self
                     .call(&method, &Params::new(params))
@@ -387,6 +458,7 @@ impl State {
                 self.context.call("getpeerinfo", &params).await?,
             );
         }
+        snapshot.mining = self.mining_json().await?;
         if let Some(service) = &self.wallet {
             snapshot.wallet = Some(service.daemon.call("getwalletinfo", &params).await?);
             snapshot.balance = service.daemon.call("getbalance", &params).await?;
@@ -395,6 +467,23 @@ impl State {
             snapshot.received = service.daemon.call("listreceived", &params).await?;
         }
         Ok(snapshot)
+    }
+
+    async fn mining_json(&self) -> std::result::Result<Value, RpcError> {
+        let (found, in_chain) = match self.node.request(Request::Metrics).await? {
+            Response::Metrics(m) => (m.blocks_mined, m.blocks_mined_in_chain),
+            _ => (0, 0),
+        };
+        let prefix = self.network.address_prefix();
+        Ok(json!({
+            "enabled": self.mining.enabled,
+            "active": self.miner.is_some(),
+            "threads": self.miner.as_ref().map_or(self.mining.threads, |m| m.threads),
+            "max_threads": config::max_mining_threads(),
+            "payout": self.miner.as_ref().map(|m| m.payout.encode(prefix)),
+            "found": found,
+            "in_chain": in_chain,
+        }))
     }
 
     async fn publish(&self, updates: &watch::Sender<Snapshot>, addr: SocketAddr) {

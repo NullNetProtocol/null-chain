@@ -57,6 +57,7 @@ struct Screens {
     setup: screens::setup::Form,
     receive: screens::receive::Form,
     send: screens::send::Form,
+    mining: screens::mining::Form,
 }
 
 /// A backend request in flight and where its result goes; `None` shows
@@ -269,8 +270,7 @@ fn route(
     paths: &Paths,
 ) -> Option<Effect> {
     if page == Page::Node {
-        screens::node::show(ui, state, paths);
-        return None;
+        return screens::node::show(ui, state, paths, &mut screens.mining);
     }
     if state.wallet.is_none() {
         return screens.setup.show(ui, state.wallet_present);
@@ -378,6 +378,8 @@ mod tests {
                 { "operation_id": 4, "total": "7", "status": "queued", "cancellable": true },
             ]),
             received: json!([{ "amount": "5", "confirmations": 0, "memo": "thanks" }]),
+            mining: json!({ "enabled": true, "active": true, "threads": 2, "max_threads": 8,
+                "payout": "tnull1xyz", "found": 3, "in_chain": 2 }),
             error: None,
         }
     }

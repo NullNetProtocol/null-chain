@@ -64,6 +64,8 @@ network = "test"
 rpc = "127.0.0.1:18448"
 connect = ["127.0.0.1:19000"]
 lock_after_minutes = 15
+mine = false
+mining_threads = 4
 # listen = "127.0.0.1:18445"
 # proxy = "127.0.0.1:9050"
 ```
@@ -106,6 +108,20 @@ answer buffers are zeroized.
 An unlocked wallet locks itself after `lock_after_minutes` without keyboard
 or pointer input (15 by default; 0 disables it). The lock is skipped while
 a backend request is running or the recovery phrase is on screen.
+
+## Mining
+
+The Node page has a Mining card with an on/off switch and a thread slider
+(1 to the machine's CPU count; the default is half). Mining needs an
+unlocked wallet and always pays the wallet's main address, the one at
+index 0. While the wallet is locked the switch is disabled. Locking stops
+the miner, and a saved `mine = true` starts it again on the next unlock.
+Moving the slider while mining restarts the miner with the new count.
+
+The switch saves `mine` and `mining_threads` to `null.conf` in place;
+other settings and comments are kept. The first start builds the coinbase
+proving key, which takes a few seconds. The card shows the payout address
+and how many blocks this session found and how many are in the main chain.
 
 ## RPC
 
