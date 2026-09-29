@@ -1,0 +1,5 @@
+# Files embedded at build time or run by Unix tools keep LF line endings on
+# every checkout. Git on Windows would otherwise convert them to CRLF, which
+# breaks the desktop entry template and bash scripts.
+*.desktop text eol=lf
+*.sh text eol=lf
