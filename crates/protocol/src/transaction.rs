@@ -277,7 +277,7 @@ pub(crate) mod tests {
 
     /// A structurally complete transaction whose signatures are over an
     /// arbitrary message, so it encodes but does not verify.
-    fn sample_transaction(seed: u64, count: usize) -> Transaction {
+    pub(crate) fn sample_transaction(seed: u64, count: usize) -> Transaction {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         let actions = (0..count).map(|_| sample_action(&mut rng, b"x")).collect();
         Transaction::new(

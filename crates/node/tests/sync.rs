@@ -7,6 +7,8 @@
     clippy::indexing_slicing
 )]
 
+mod common;
+
 use std::time::{Duration, Instant};
 
 use null_circuit::proof::ProvingKey;
@@ -83,12 +85,14 @@ async fn follower_syncs_from_miner_and_relays_a_payment() {
     .unwrap();
 
     // The follower catches up with the miner.
-    wait_for(Duration::from_secs(120), async || {
-        height(&follower).await >= 3
+    // Until the first reward matures, the miner has nothing to spend.
+    let spendable = common::first_spendable_height();
+    wait_for(Duration::from_secs(240), async || {
+        height(&follower).await >= spendable
     })
     .await;
     let miner_height = height(&miner).await;
-    assert!(miner_height >= 3);
+    assert!(miner_height >= spendable);
 
     // Scan the miner's chain as its wallet and pay the receiver through
     // the follower, which relays to the miner.
@@ -97,12 +101,7 @@ async fn follower_syncs_from_miner_and_relays_a_payment() {
         panic!("genesis")
     };
     let wallet = Wallet::in_memory(&miner_sk, genesis.hash(), &mut rng).unwrap();
-    for h in 0..=scanned_to {
-        let Response::Block(Some(block)) = miner.request(Request::Block(h)).await.unwrap() else {
-            panic!("block")
-        };
-        wallet.scan(&block).unwrap();
-    }
+    common::scan_chain(&miner, &wallet, scanned_to).await;
     assert!(
         wallet.balance().unwrap() > 0,
         "the miner earned coinbase notes"

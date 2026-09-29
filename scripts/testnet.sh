@@ -2,7 +2,7 @@
 # End-to-end check on one machine: two nodes, encrypted wallets, a
 # payment, and the faucet. Prints PASS or FAIL at the end.
 #
-#   scripts/testnet.sh            # builds release, runs for ~40 s
+#   scripts/testnet.sh            # builds release, runs for ~90 s
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -20,7 +20,7 @@ $B run --network test --listen 127.0.0.1:19000 --mine "$MINER_ADDR" \
 sleep 3
 $B run --network test --connect 127.0.0.1:19000 \
     --rpc 127.0.0.1:18445 --datadir "$S/follower" > "$S/follower.log" 2>&1 &
-sleep 12
+sleep 3
 
 # Each node wrote its control token to its data directory; the raw socket
 # wants it on the first line, the commands take it as a file.
@@ -35,6 +35,16 @@ else
     echo "FAIL: control socket answered without a token"
     exit 1
 fi
+
+# A block reward is spendable once it matures: the test network's
+# coinbase_maturity is 10, so the first one is spendable at height 11.
+# Wait for height 12 so the follower has relayed it too.
+for _ in $(seq 180); do
+    H=$(status 127.0.0.1 18444 "$S/miner/rpc.token" | sed 's/.*height=\([0-9]*\).*/\1/')
+    [[ ${H:-0} -ge 12 ]] && break
+    sleep 1
+done
+echo "miner height $H: its first reward has matured"
 
 BEFORE=$($B balance --wallet "$S/miner.wallet" "${MINER_RPC[@]}" | tail -1)
 echo "miner balance: $BEFORE"

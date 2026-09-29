@@ -34,6 +34,7 @@ pub mod compact;
 pub mod consensus;
 pub mod disclosure;
 mod error;
+pub mod maturity;
 pub mod memo;
 pub mod note;
 pub mod note_encryption;

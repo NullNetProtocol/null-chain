@@ -245,6 +245,10 @@ pub fn parse(line: &str) -> Result<Request> {
             .parse()
             .map(Request::Hash)
             .map_err(|_| Error::Argument("height".into())),
+        "coinbase" => argument
+            .parse()
+            .map(Request::Coinbase)
+            .map_err(|_| Error::Argument("height".into())),
         "submit" => {
             let bytes = from_hex(argument)?;
             Ok(Request::Submit(Box::new(Transaction::from_slice(&bytes)?)))
@@ -285,9 +289,11 @@ pub fn format(response: &Response) -> String {
         Response::Block(Some(block)) => format!("ok {}", to_hex(&block.to_vec())),
         Response::Compact(Some(block)) => format!("ok {}", to_hex(&block.to_vec())),
         Response::Hash(Some(hash)) => format!("ok {}", to_hex(hash.as_bytes())),
-        Response::Block(None) | Response::Compact(None) | Response::Hash(None) => {
-            "err not found".into()
-        }
+        Response::Coinbase(Some(tx)) => format!("ok {}", to_hex(&tx.to_vec())),
+        Response::Block(None)
+        | Response::Compact(None)
+        | Response::Hash(None)
+        | Response::Coinbase(None) => "err not found".into(),
         Response::Submitted(txid) => format!("ok {txid}"),
         Response::TransactionStatus(TxStatus::Unknown) => "ok unknown".into(),
         Response::TransactionStatus(TxStatus::Pooled) => "ok pooled".into(),
@@ -686,6 +692,8 @@ mod tests {
         assert!(matches!(parse("status"), Ok(Request::Status)));
         assert!(matches!(parse("block 7"), Ok(Request::Block(7))));
         assert!(matches!(parse("compact 7"), Ok(Request::Compact(7))));
+        assert!(matches!(parse("coinbase 7"), Ok(Request::Coinbase(7))));
+        assert!(parse("coinbase x").is_err());
         assert!(matches!(parse("hash 7"), Ok(Request::Hash(7))));
         assert!(parse("block x").is_err());
         assert!(parse("submit zz").is_err());

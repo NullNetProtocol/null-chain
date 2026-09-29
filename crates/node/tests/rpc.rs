@@ -8,6 +8,8 @@
     clippy::arithmetic_side_effects
 )]
 
+mod common;
+
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -23,6 +25,7 @@ use null_node::rpc::Token;
 use null_protocol::amount::Amount;
 use null_protocol::block::Block;
 use null_protocol::bytes::Encodable;
+use null_protocol::compact::CompactBlock;
 use null_protocol::memo::Memo;
 use null_wallet::keys::WalletKeys;
 use null_wallet::spend::{build_payment, Payment};
@@ -114,7 +117,12 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
     .unwrap();
     let addr = node.rpc_http_addr.unwrap();
     let t = token.expose();
-    wait_for(Duration::from_secs(120), async || height(&node).await >= 2).await;
+    // Until the first reward matures, the miner has nothing to spend.
+    let spendable = common::first_spendable_height();
+    wait_for(Duration::from_secs(240), async || {
+        height(&node).await >= spendable
+    })
+    .await;
 
     // Auth and transport errors.
     let ping = json!({"jsonrpc": "2.0", "method": "getblockcount", "id": 1}).to_string();
@@ -161,7 +169,10 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
     assert_eq!(info["fee_per_action"], "10000");
     assert_eq!(info["branch"], "0x54455354");
     assert_eq!(info["proof_lengths"]["2"], 8736);
-    assert_eq!(info["coinbase_maturity"], 0);
+    assert_eq!(
+        info["coinbase_maturity"],
+        Network::Test.params().coinbase_maturity
+    );
 
     // Blocks by height and hash, at every verbosity.
     let hex = call(addr, t, "getblock", json!([1, 0])).await;
@@ -193,8 +204,18 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
         call_err(addr, t, "getblock", json!([&"00".repeat(32)])).await,
         NOT_FOUND
     );
+    // Compact blocks list actions in tree order: block 1's reward has not
+    // matured, and it has no other transactions, so it appends nothing.
     let compact = call(addr, t, "getcompactblock", json!([1])).await;
-    assert!(compact.as_str().unwrap().len() > 100);
+    let compact = CompactBlock::from_slice(&from_hex(compact.as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!((compact.height, compact.actions.len()), (1, 0));
+    let matured = call(addr, t, "getcompactblock", json!([spendable - 1])).await;
+    let matured = CompactBlock::from_slice(&from_hex(matured.as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(
+        matured.actions.len(),
+        block_1.transactions()[0].actions().len(),
+        "block 1's reward enters with the block before it is spendable"
+    );
 
     // Transactions by id.
     let coinbase = block_1.transactions()[0].clone();
@@ -236,12 +257,7 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
     };
     let wallet = Wallet::in_memory(&miner_sk, genesis.hash(), &mut rng).unwrap();
     let scanned_to = height(&node).await;
-    for h in 0..=scanned_to {
-        let Response::Block(Some(block)) = node.request(Request::Block(h)).await.unwrap() else {
-            panic!("block {h}")
-        };
-        wallet.scan(&block).unwrap();
-    }
+    common::scan_chain(&node, &wallet, scanned_to).await;
     let pk = ProvingKey::build().unwrap();
     let payment = Payment {
         recipient: receiver.default_address().unwrap(),

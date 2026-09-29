@@ -22,6 +22,7 @@ use null_protocol::block::{Block, BlockHeader};
 use null_protocol::consensus::{
     next_height, subsidy, BranchId, BLOCK_VERSION, MAX_BLOCK_TRANSACTIONS,
 };
+use null_protocol::maturity::{earlier_origin, tree_transactions};
 use null_protocol::nullifier::Nullifier;
 use null_protocol::transaction::Transaction;
 use null_protocol::validate as tx_validate;
@@ -204,8 +205,10 @@ impl Validator<'_> {
         batch.verify(self.vk, rng)
     }
 
-    /// Checks every transaction and returns the tree after their outputs,
-    /// appended in block order.
+    /// Checks every transaction and returns the tree after the outputs the
+    /// block appends, in tree order: the coinbase maturing at this height,
+    /// then the block's transactions after its own coinbase, which waits
+    /// for its own maturity.
     fn check_transactions(
         &self,
         store: &Store,
@@ -214,23 +217,24 @@ impl Validator<'_> {
     ) -> Result<CommitmentTree> {
         let branch = self.params.branch_at(block.header().height);
         let mut batch = AuthorizationBatch::default();
-        let mut tree = store.tree()?;
         for (tx, balance) in balances(block)? {
             batch.queue(tx, balance, branch)?;
-            self.check_chain_state(store, tx, &mut tree)?;
+            self.check_chain_state(store, tx)?;
         }
         batch.verify(self.vk, rng)?;
+        let earlier = earlier_coinbase(store, self.params, block.header().height)?;
+        let mut tree = store.tree()?;
+        for tx in tree_transactions(block, self.params.coinbase_maturity, earlier.as_ref())? {
+            for action in tx.actions() {
+                tree.append(action.body().cmx())?;
+            }
+        }
         Ok(tree)
     }
 
-    /// The checks that need the store: anchor age, nullifier freshness
-    /// against the chain, and room in the tree for the outputs.
-    fn check_chain_state(
-        &self,
-        store: &Store,
-        tx: &Transaction,
-        tree: &mut CommitmentTree,
-    ) -> Result<()> {
+    /// The checks that need the store: anchor age and nullifier freshness
+    /// against the chain.
+    fn check_chain_state(&self, store: &Store, tx: &Transaction) -> Result<()> {
         if store
             .anchor_height(tx.anchor(), self.params.anchor_max_age)?
             .is_none()
@@ -242,11 +246,35 @@ impl Validator<'_> {
                 return Err(Error::InvalidBlock("nullifier already spent"));
             }
         }
-        for action in tx.actions() {
-            tree.append(action.body().cmx())?;
-        }
         Ok(())
     }
+}
+
+/// The coinbase of an earlier main-chain block that matures at `height`,
+/// if one does. Blocks are applied in order, so during a reorganization the
+/// store's main chain already holds the new branch below `height`.
+///
+/// # Errors
+/// Returns a storage error, or [`Error::InvalidBlock`] if the store lacks
+/// the block or it has no coinbase.
+pub fn earlier_coinbase(
+    store: &Store,
+    params: &ChainParams,
+    height: u32,
+) -> Result<Option<Transaction>> {
+    let Some(origin) = earlier_origin(height, params.coinbase_maturity) else {
+        return Ok(None);
+    };
+    let block = store
+        .hash_at(origin)?
+        .and_then(|hash| store.block(&hash).transpose())
+        .transpose()?
+        .ok_or(Error::InvalidBlock("maturing block missing"))?;
+    let coinbase = block
+        .transactions()
+        .first()
+        .ok_or(Error::InvalidBlock("maturing block has no coinbase"))?;
+    Ok(Some(coinbase.clone()))
 }
 
 /// Every transaction of `block` with the public balance it must prove:

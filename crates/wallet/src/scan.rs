@@ -8,7 +8,7 @@ use null_protocol::memo::Memo;
 use null_protocol::note::{Note, RandomSeed, Rho};
 use null_protocol::note_encryption::{decrypt_note_with_ivk, detect_note_with_ivk};
 use null_protocol::nullifier::Nullifier;
-use null_protocol::transaction::TxId;
+use null_protocol::transaction::{Transaction, TxId};
 
 use crate::keys::WalletKeys;
 use crate::Result;
@@ -157,23 +157,40 @@ impl StandIn {
     }
 }
 
-/// Decrypts every action of `block` with `keys`. Positions start at
-/// `first_position`, the tree size before the block. Every action costs
-/// the same work whether or not it is ours; see the internal `StandIn` helper.
+/// Decrypts the outputs `block` appends to the tree with `keys`: `tree`
+/// lists those transactions in tree order, from
+/// [`null_protocol::maturity::tree_transactions`], so a maturing coinbase
+/// from an earlier block is scanned here and the block's own coinbase
+/// waits. Positions start at `first_position`, the tree size before the
+/// block. Spends are every nullifier the block itself reveals. Every action
+/// costs the same work whether or not it is ours; see the internal
+/// `StandIn` helper.
 ///
 /// # Errors
 /// Fails if a decrypted note cannot derive its nullifier.
-pub fn scan_block(keys: &WalletKeys, block: &Block, first_position: u64) -> Result<BlockScan> {
+pub fn scan_block(
+    keys: &WalletKeys,
+    block: &Block,
+    tree: &[&Transaction],
+    first_position: u64,
+) -> Result<BlockScan> {
     let mut scan = BlockScan::default();
-    let stand_in = StandIn::new(keys)?;
     for tx in block.transactions() {
+        let txid = tx.txid();
+        scan.spent.extend(
+            tx.actions()
+                .iter()
+                .map(|a| (*a.body().nullifier(), Some(txid))),
+        );
+    }
+    let stand_in = StandIn::new(keys)?;
+    for tx in tree {
         let txid = tx.txid();
         for action in tx.actions() {
             let body = action.body();
             let position =
                 first_position.saturating_add(u64::try_from(scan.leaves.len()).unwrap_or(u64::MAX));
             scan.leaves.push(*body.cmx().inner());
-            scan.spent.push((*body.nullifier(), Some(txid)));
             let rho = Rho::from_nullifier(body.nullifier())?;
             let decrypted = decrypt_note_with_ivk(
                 keys.incoming_viewing_key(),
@@ -204,9 +221,12 @@ pub fn scan_block(keys: &WalletKeys, block: &Block, first_position: u64) -> Resu
     Ok(scan)
 }
 
-/// Detects owned notes in one compact block. Produces the same leaves
-/// and spent nullifiers as [`scan_block`], and the same owned notes
-/// except that their memos are empty, since a compact block omits them.
+/// Detects owned notes in one compact block. Produces the same leaves as
+/// [`scan_block`] and the same owned notes, except that their memos are
+/// empty, since a compact block omits them. Its spent nullifiers are those
+/// of its tree-order actions: it leaves out the block's own coinbase and
+/// includes the maturing one, which differ only in coinbase dummy spends
+/// that never match a wallet note.
 ///
 /// # Errors
 /// Fails if a detected note cannot derive its nullifier.

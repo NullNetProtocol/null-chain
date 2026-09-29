@@ -105,7 +105,8 @@ async fn payout(
         return Err(Error::Argument("this client was paid recently".into()));
     }
     let mut rpc = state.node.connect().await?;
-    let scanned = sync_wallet(&mut rpc, &state.wallet, false).await?;
+    let maturity = state.network.params().coinbase_maturity;
+    let scanned = sync_wallet(&mut rpc, &state.wallet, false, maturity).await?;
     let branch = state.network.params().branch_at(next_height(scanned)?);
     let amount = state.amount;
     let txid = pay(

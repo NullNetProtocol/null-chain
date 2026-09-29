@@ -48,6 +48,11 @@ pub struct ChainParams {
     pub max_future_seconds: u64,
     /// Deepest reorganization a node accepts; older frontiers are pruned.
     pub max_reorg_depth: u32,
+    /// Blocks before a block reward can be spent: the coinbase outputs of
+    /// block `h` enter the commitment tree while block `h + M - 1` is
+    /// applied, so they are first spendable in block `h + M`. Genesis is
+    /// exempt; one means no delay. See `null_protocol::maturity`.
+    pub coinbase_maturity: u32,
     /// Known-good blocks, ascending by height.
     pub checkpoints: &'static [Checkpoint],
     /// How addresses for this network are written.
@@ -120,6 +125,8 @@ impl ChainParams {
             anchor_max_age: 100,
             max_future_seconds: 2 * 60 * 60,
             max_reorg_depth: 200,
+            // About 3 h 20 min at two-minute blocks, as Bitcoin and Zcash.
+            coinbase_maturity: 100,
             checkpoints: &[],
             address_prefix: AddressPrefix::Main,
             genesis_branch: BranchId::new(0x4d41_494e),
@@ -150,6 +157,9 @@ impl ChainParams {
             anchor_max_age: 100,
             max_future_seconds: 2 * 60 * 60,
             max_reorg_depth: 200,
+            // Short enough for tests and a quick test network, long enough
+            // that the rule is exercised.
+            coinbase_maturity: 10,
             checkpoints: &[],
             address_prefix: AddressPrefix::Test,
             genesis_branch: BranchId::new(0x5445_5354),

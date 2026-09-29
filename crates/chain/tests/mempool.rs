@@ -180,6 +180,8 @@ static UPGRADE_AT_3: [Upgrade; 1] = [Upgrade {
 fn the_pool_empties_at_an_upgrade_and_admits_only_the_new_branch_after() {
     let params = ChainParams {
         upgrades: &UPGRADE_AT_3,
+        // Maturity one: these tests spend fresh rewards; maturity is tested elsewhere.
+        coinbase_maturity: 1,
         ..ChainParams::test()
     };
     let mut h = Harness::with_params(6, params);
@@ -225,6 +227,8 @@ fn the_pool_empties_at_an_upgrade_and_admits_only_the_new_branch_after() {
 fn a_reorganization_below_an_activation_empties_the_pool_too() {
     let params = ChainParams {
         upgrades: &UPGRADE_AT_3,
+        // Maturity one: these tests spend fresh rewards; maturity is tested elsewhere.
+        coinbase_maturity: 1,
         ..ChainParams::test()
     };
     let mut h = Harness::with_params(7, params);

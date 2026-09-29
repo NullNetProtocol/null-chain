@@ -14,16 +14,17 @@ use null_chain::chain::{Chain, Import};
 use null_chain::difficulty::{next_target, Sample};
 use null_chain::params::ChainParams;
 use null_chain::target::Target;
-use null_chain::validate::{header_lookback, recent_headers};
+use null_chain::validate::{earlier_coinbase, header_lookback, recent_headers};
 use null_chain::Error;
 use null_circuit::proof::ProvingKey;
 use null_crypto::keys::{Diversifier, FullViewingKey, SpendingKey};
 use null_crypto::merkle::MerkleTree;
 use null_protocol::address::Address;
 use null_protocol::amount::Amount;
-use null_protocol::block::{Block, BlockHeader, PowSolution};
+use null_protocol::block::{empty_header, Block, BlockHeader, PowSolution};
 use null_protocol::builder::{Builder, OutputInfo, SpendInfo};
 use null_protocol::consensus::{subsidy, BranchId, BLOCK_VERSION, FEE_PER_ACTION};
+use null_protocol::maturity::tree_transactions;
 use null_protocol::memo::Memo;
 use null_protocol::note::{Note, Rho};
 use null_protocol::note_encryption::decrypt_note_with_ivk;
@@ -67,10 +68,11 @@ impl Wallet {
         }
     }
 
-    /// Scans a block the way a wallet would, tracking the tree.
-    pub fn scan(&mut self, block: &Block) {
+    /// Scans the transactions a block appends to the tree, in tree order
+    /// (from `tree_transactions`), the way a wallet would.
+    pub fn scan(&mut self, tree: &[&Transaction]) {
         let ivk = self.fvk.incoming_viewing_key().unwrap();
-        for tx in block.transactions() {
+        for tx in tree {
             for action in tx.actions() {
                 let body = action.body();
                 let position = self.tree.append(*body.cmx().inner()).unwrap();
@@ -114,8 +116,17 @@ pub struct Harness {
 }
 
 impl Harness {
+    /// A harness on the test network with coinbase maturity one, so a
+    /// block reward is spendable in the next block. Tests of other rules
+    /// then need no maturing blocks; maturity has its own tests.
     pub fn new(seed: u64) -> Self {
-        Self::with_params(seed, ChainParams::test())
+        Self::with_params(
+            seed,
+            ChainParams {
+                coinbase_maturity: 1,
+                ..ChainParams::test()
+            },
+        )
     }
 
     /// A harness on a chain with explicit parameters, for upgrade tests.
@@ -131,7 +142,8 @@ impl Harness {
         // Genesis carries the premine coinbase, whose leaves every later
         // witness is computed over.
         let genesis_hash = chain.store().hash_at(0).unwrap().unwrap();
-        miner.scan(&chain.store().block(&genesis_hash).unwrap().unwrap());
+        let genesis = chain.store().block(&genesis_hash).unwrap().unwrap();
+        miner.scan(&tree_transactions(&genesis, params.coinbase_maturity, None).unwrap());
         Self {
             spacing: params.block_interval,
             chain,
@@ -147,12 +159,28 @@ impl Harness {
     }
 
     /// Builds and mines a block on top of any `parent` whose tree after
-    /// application is `parent_tree`. Returns the block and its tree.
+    /// application is `parent_tree`, taking a maturing coinbase from the
+    /// main chain. Returns the block and its tree.
     pub fn make_block_on(
         &mut self,
         parent: &BlockHeader,
         parent_tree: &CommitmentTree,
         txs: Vec<Transaction>,
+    ) -> (Block, CommitmentTree) {
+        let params = *self.chain.params();
+        let earlier = earlier_coinbase(self.chain.store(), &params, parent.height + 1).unwrap();
+        self.make_block_after(parent, parent_tree, txs, earlier.as_ref())
+    }
+
+    /// As [`Self::make_block_on`] with the maturing coinbase given, for a
+    /// side chain whose blocks at the maturing height differ from the main
+    /// chain's.
+    pub fn make_block_after(
+        &mut self,
+        parent: &BlockHeader,
+        parent_tree: &CommitmentTree,
+        txs: Vec<Transaction>,
+        earlier: Option<&Transaction>,
     ) -> (Block, CommitmentTree) {
         let height = parent.height + 1;
         let fees: u64 = txs.iter().map(|t| t.fee().unwrap().raw()).sum();
@@ -174,17 +202,21 @@ impl Harness {
             .unwrap();
         let mut transactions = vec![coinbase];
         transactions.extend(txs);
+        let params = *self.chain.params();
 
-        // The tree after this block: the store's tree at the parent plus
-        // every commitment in block order.
+        // The tree after this block: the tree at the parent plus the
+        // commitments the block appends, in tree order.
         let mut tree = parent_tree.clone();
-        for tx in &transactions {
+        let block = Block::new(
+            empty_header(height, parent.hash(), parent.commitment_root),
+            transactions.clone(),
+        );
+        for tx in tree_transactions(&block, params.coinbase_maturity, earlier).unwrap() {
             for action in tx.actions() {
                 tree.append(action.body().cmx()).unwrap();
             }
         }
 
-        let params = *self.chain.params();
         let recent =
             recent_headers(self.chain.store(), parent.height, header_lookback(&params)).unwrap();
         let samples: Vec<Sample> = recent
@@ -236,8 +268,16 @@ impl Harness {
         let parent = self.tip_header();
         let block = self.make_block(&parent, txs);
         assert_eq!(self.import(&block).unwrap(), Import::Extended);
-        self.miner.scan(&block);
+        self.scan(&block);
         block
+    }
+
+    /// Scans a main-chain block into the miner's wallet in tree order.
+    pub fn scan(&mut self, block: &Block) {
+        let params = *self.chain.params();
+        let earlier = earlier_coinbase(self.chain.store(), &params, block.header().height).unwrap();
+        let tree = tree_transactions(block, params.coinbase_maturity, earlier.as_ref()).unwrap();
+        self.miner.scan(&tree);
     }
 }
 

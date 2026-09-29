@@ -396,7 +396,8 @@ impl WalletDaemon {
         let _guard = self.0.sync_lock.lock().await;
         self.recover_interrupted_operations()?;
         let mut client = self.0.node.connect().await?;
-        let tip = sync_wallet(&mut client, &self.0.wallet, self.0.light).await?;
+        let maturity = self.0.params.coinbase_maturity;
+        let tip = sync_wallet(&mut client, &self.0.wallet, self.0.light, maturity).await?;
         *self
             .0
             .node_height
@@ -1521,7 +1522,9 @@ mod tests {
     #[tokio::test]
     async fn failed_replacements_keep_pending_transactions_and_retry_limits_keep_locks() {
         let (_dir, wallet) = wallet_file();
-        wallet.scan(&genesis(&Network::Test.params())).unwrap();
+        wallet
+            .scan(&genesis(&Network::Test.params()), 1, None)
+            .unwrap();
         let mut op = recorded_payment(&wallet);
         op.status = OperationStatus::Queued;
         op.attempts = MAX_ATTEMPTS;
@@ -1597,7 +1600,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_restarted_prover_and_a_lost_acceptance_reply_preserve_one_real_payment() {
         let (dir, wallet) = wallet_file();
-        wallet.scan(&genesis(&Network::Test.params())).unwrap();
+        wallet
+            .scan(&genesis(&Network::Test.params()), 1, None)
+            .unwrap();
         assert!(wallet.balance().unwrap() > 0);
         let mut op = payment(&wallet);
         op.status = OperationStatus::Building;

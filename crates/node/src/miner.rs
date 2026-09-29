@@ -7,9 +7,10 @@ use null_chain::target::Target;
 use null_circuit::proof::ProvingKey;
 use null_protocol::address::Address;
 use null_protocol::amount::Amount;
-use null_protocol::block::{tx_root, Block, BlockHash, BlockHeader, PowSolution};
+use null_protocol::block::{empty_header, tx_root, Block, BlockHash, BlockHeader, PowSolution};
 use null_protocol::builder::{Builder, OutputInfo};
 use null_protocol::consensus::{next_height, subsidy, BLOCK_VERSION};
+use null_protocol::maturity::tree_transactions;
 use null_protocol::memo::Memo;
 use null_protocol::transaction::Transaction;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,6 +38,9 @@ pub struct Template {
     pub tree: CommitmentTree,
     /// Transactions to include after the coinbase.
     pub transactions: Vec<Transaction>,
+    /// The coinbase of an earlier block that matures in this one, whose
+    /// outputs enter the tree first (see `null_protocol::maturity`).
+    pub earlier: Option<Transaction>,
     /// Network parameters.
     pub params: ChainParams,
     /// Wall-clock time.
@@ -64,12 +68,21 @@ impl Template {
 
         let mut transactions = vec![coinbase];
         transactions.extend(self.transactions.iter().cloned());
+        // The tree after the block: the maturing coinbase, then the block's
+        // own transactions after its coinbase, which waits to mature.
+        let draft = Block::new(
+            empty_header(height, self.parent.hash(), self.parent.commitment_root),
+            transactions,
+        );
         let mut tree = self.tree.clone();
-        for tx in &transactions {
+        let order =
+            tree_transactions(&draft, self.params.coinbase_maturity, self.earlier.as_ref())?;
+        for tx in order {
             for action in tx.actions() {
                 tree.append(action.body().cmx())?;
             }
         }
+        let transactions = draft.transactions().to_vec();
         let header = BlockHeader {
             version: BLOCK_VERSION,
             prev_hash: self.parent.hash(),

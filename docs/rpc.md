@@ -113,7 +113,7 @@ ids are `0x` hex of their 32-bit value.
 
 | Method | Parameters | Result |
 |---|---|---|
-| `getblockchaininfo` | | `network`, `height`, `best_block_hash`, `genesis_hash`, `syncing`, `branch` (at the tip), `next_branch` (for the next block), `genesis_branch`, `upgrades[{height, branch}]`, `block_interval`, `difficulty_window`, `anchor_max_age`, `max_reorg_depth`, `max_future_seconds`, `pow_limit` (compact hex), `equihash{n,k}`, `fee_per_action`, `action_classes`, `max_actions`, `proof_lengths{class: bytes}`, `max_block_transactions`, `coinbase_maturity` (0), `coin`, `max_money`, `premine` |
+| `getblockchaininfo` | | `network`, `height`, `best_block_hash`, `genesis_hash`, `syncing`, `branch` (at the tip), `next_branch` (for the next block), `genesis_branch`, `upgrades[{height, branch}]`, `block_interval`, `difficulty_window`, `anchor_max_age`, `max_reorg_depth`, `max_future_seconds`, `pow_limit` (compact hex), `equihash{n,k}`, `fee_per_action`, `action_classes`, `max_actions`, `proof_lengths{class: bytes}`, `max_block_transactions`, `coinbase_maturity` (blocks; 100 on mainnet, 10 on test), `coin`, `max_money`, `premine` |
 | `getblockcount` | | tip height |
 | `getbestblockhash` | | tip hash |
 | `getblockhash` | `height` | hash, or -1 |
@@ -125,7 +125,7 @@ ids are `0x` hex of their 32-bit value.
 | `getrawmempool` | | txids, oldest first |
 | `getmempoolinfo` | | `size`, `capacity` |
 | `getnullifierstatus` | `nullifier` | `{spent}`. Every nullifier of every mined transaction is spent, the dummy spends of a coinbase included |
-| `getcompactblock` | `height` | hex of the compact block light clients sync on |
+| `getcompactblock` | `height` | hex of the compact block light clients sync on; its actions are the ones the block appends, in tree order, so a maturing coinbase appears where it matures |
 | `getpeerinfo` | | `[{id, addr, target, direction, ready, version, best_height, score}]` |
 | `getnetworkinfo` | | `network`, `protocol_version`, `connections`, `connections_in`, `connections_out`, `handshaking` |
 | `getconnectioncount` | | ready peers |
@@ -190,11 +190,12 @@ is `2^256 / (target + 1)`: the expected number of Equihash solutions the
 whole network tries per second. It is a coarse estimate from block
 timestamps, as Bitcoin's `networkhashps` is.
 
-**Rules a pool must know.** There is no coinbase maturity: a coinbase
-output is spendable once its anchor is a valid root, which is the next
-block. Reorganizations deeper than 200 blocks are refused, so 200
-confirmations is safe against anything the network will accept; pools
-choose their own smaller number. Stratum is the pool's side: it splits
+**Rules a pool must know.** Coinbase outputs mature: a reward mined at
+height `h` enters the note tree at `h + M - 1` and is spendable from block
+`h + M`, where `M` is `coinbase_maturity` (100 on mainnet). Wallets find a
+reward when it matures. Reorganizations deeper than 200 blocks are
+refused, so 200 confirmations is safe against anything the network will
+accept; pools choose their own number above the maturity. Stratum is the pool's side: it splits
 the 32-byte nonce space among miners, validates shares against
 `pow_input` with its own Equihash verifier, and pays miners through the
 wallet daemon of Phase 3, fifteen per transaction.
@@ -207,9 +208,9 @@ be documented against Zcash's stratum so a pool operator sees what to
 change. Payouts to miners are batched shielded sends, fifteen per
 transaction, through the wallet daemon below.
 
-**Rules to state up front.** There is no coinbase maturity rule: a
-coinbase output is spendable as soon as its anchor is a valid root, which
-is the next block. Reorganizations deeper than 200 blocks are refused, so
+**Rules to state up front.** A coinbase output is spendable only after
+`coinbase_maturity` blocks (100 on mainnet): it enters the note tree at
+`h + M - 1` and wallets see it then. Reorganizations deeper than 200 blocks are refused, so
 a pool that waits 200 confirmations before paying miners is safe against
 any reorganization the network will accept; in practice a much smaller
 number is fine and the pool chooses its own risk.

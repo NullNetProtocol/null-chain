@@ -80,7 +80,7 @@ fn a_coinbase_output_can_be_spent_once() {
 
     let block = h.make_block(&parent, vec![tx.clone()]);
     assert_eq!(h.import(&block).unwrap(), Import::Extended);
-    h.miner.scan(&block);
+    h.scan(&block);
     assert!(
         h.chain.store().contains_nullifier(&nullifier).unwrap()
             || h.chain
@@ -250,9 +250,11 @@ static UPGRADE_AT_3: [Upgrade; 1] = [Upgrade {
     branch: BranchId::new(0x0000_0002),
 }];
 
+/// Maturity one keeps block order, so `block_over` can append in it.
 fn params_with_upgrade() -> ChainParams {
     ChainParams {
         upgrades: &UPGRADE_AT_3,
+        coinbase_maturity: 1,
         ..ChainParams::test()
     }
 }
@@ -636,4 +638,72 @@ fn transactions_are_indexed_by_id_while_in_the_main_chain() {
     store.revert().unwrap();
     assert_eq!(store.transaction_location(&txid).unwrap(), None);
     assert_eq!(store.transaction(&coinbase).unwrap(), None);
+}
+
+// ---- coinbase maturity ----------------------------------------------
+
+/// Three blocks: a reward mined at `h` enters the tree at `h + 2` and is
+/// spendable at `h + 3`.
+fn params_with_maturity() -> ChainParams {
+    ChainParams {
+        coinbase_maturity: 3,
+        ..ChainParams::test()
+    }
+}
+
+#[test]
+fn a_block_that_appends_its_own_coinbase_at_once_is_refused() {
+    let mut h = Harness::with_params(40, params_with_maturity());
+    let parent = h.tip_header();
+    let branch = h.chain.params().genesis_branch;
+    let coinbase = coinbase_for(&mut h, &parent, branch);
+    // block_over appends in plain block order, the rule before maturity.
+    let premature = block_over(&mut h, &parent, vec![coinbase]);
+    assert!(matches!(
+        h.import(&premature),
+        Err(Error::InvalidHeader("commitment root mismatch"))
+    ));
+}
+
+#[test]
+fn a_reward_enters_the_tree_only_at_maturity_and_is_then_spendable() {
+    let mut h = Harness::with_params(41, params_with_maturity());
+    let tree_size = |h: &Harness| h.chain.store().tree().unwrap().size();
+    let genesis_size = tree_size(&h);
+    h.extend(Vec::new());
+    h.extend(Vec::new());
+    assert_eq!(tree_size(&h), genesis_size, "no reward has matured");
+    assert!(h.miner.notes.is_empty(), "the miner cannot spend yet");
+
+    h.extend(Vec::new());
+    assert!(
+        tree_size(&h) > genesis_size,
+        "block 1's reward entered at 3"
+    );
+    assert_eq!(h.miner.notes.len(), 1);
+
+    let other = Wallet::new(&mut ChaCha20Rng::seed_from_u64(41_000));
+    let wallet = h.miner.clone_for_test(0);
+    let spend = common::spend_first_note(&mut h, &wallet, &other.address, 1_000);
+    h.extend(vec![spend]);
+    assert_eq!(h.chain.tip().unwrap().height, 4, "spent in block h + M");
+}
+
+#[test]
+fn after_a_reorganization_the_new_chains_coinbase_matures() {
+    let mut h = Harness::with_params(42, params_with_maturity());
+    let genesis = h.tip_header();
+    let genesis_tree = h.chain.store().tree_at(0).unwrap().unwrap();
+    h.extend(Vec::new());
+    h.extend(Vec::new());
+
+    // A longer side chain from genesis: its block 3 matures its own block
+    // 1's coinbase, not the replaced main chain's.
+    let (b1, t1) = h.make_block_after(&genesis, &genesis_tree, Vec::new(), None);
+    let (b2, t2) = h.make_block_after(b1.header(), &t1, Vec::new(), None);
+    let (b3, _) = h.make_block_after(b2.header(), &t2, Vec::new(), Some(&b1.transactions()[0]));
+    assert_eq!(h.import(&b1).unwrap(), Import::SideChain);
+    assert_eq!(h.import(&b2).unwrap(), Import::SideChain);
+    assert!(matches!(h.import(&b3).unwrap(), Import::Reorganized { .. }));
+    assert_eq!(h.tip_header().hash(), b3.hash());
 }

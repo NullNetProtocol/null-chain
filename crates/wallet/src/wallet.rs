@@ -32,7 +32,8 @@ use null_protocol::address::Address;
 use null_protocol::block::{Block, BlockHash};
 use null_protocol::bytes::Encodable;
 use null_protocol::compact::CompactBlock;
-use null_protocol::transaction::Anchor;
+use null_protocol::maturity::tree_transactions;
+use null_protocol::transaction::{Anchor, Transaction};
 use rand_core::{CryptoRng, OsRng, RngCore};
 use redb::{
     Database, ReadOnlyTable, ReadTransaction, ReadableDatabase, ReadableTable, Table,
@@ -456,12 +457,25 @@ impl Wallet {
     /// height, records owned notes with their memos and marks notes it
     /// spent. All or nothing.
     ///
+    /// Commitments enter in tree order on a network whose coinbase matures
+    /// after `maturity` blocks: `earlier` is the coinbase maturing at this
+    /// height when it comes from an earlier block (see
+    /// [`null_protocol::maturity`]). A reward the wallet mined is found when
+    /// it matures, since only then can it be spent.
+    ///
     /// # Errors
-    /// Returns [`Error::OutOfOrder`] if `block` is not the next height.
-    pub fn scan(&self, block: &Block) -> Result<ScanReport> {
+    /// Returns [`Error::OutOfOrder`] if `block` is not the next height, or a
+    /// protocol error if `earlier` does not fit the maturity rule.
+    pub fn scan(
+        &self,
+        block: &Block,
+        maturity: u32,
+        earlier: Option<&Transaction>,
+    ) -> Result<ScanReport> {
         let height = block.header().height;
+        let tree = tree_transactions(block, maturity, earlier)?;
         self.apply(height, block.hash(), |first_position| {
-            scan_block(&self.keys, block, first_position)
+            scan_block(&self.keys, block, &tree, first_position)
         })
     }
 
@@ -1054,15 +1068,21 @@ mod tests {
         let b1 = coinbase_block(&mut rng, &owner, b0.hash(), 1, 1_000_000_000);
         {
             let wallet = Wallet::create(&path, &sk(3), genesis, b"pw", &mut rng).unwrap();
-            assert_eq!(wallet.scan(&b0).unwrap(), ScanReport { found: 0, spent: 0 });
+            assert_eq!(
+                wallet.scan(&b0, 1, None).unwrap(),
+                ScanReport { found: 0, spent: 0 }
+            );
             assert!(matches!(
-                wallet.scan(&b0),
+                wallet.scan(&b0, 1, None),
                 Err(Error::OutOfOrder {
                     expected: 1,
                     got: 0
                 })
             ));
-            assert_eq!(wallet.scan(&b1).unwrap(), ScanReport { found: 1, spent: 0 });
+            assert_eq!(
+                wallet.scan(&b1, 1, None).unwrap(),
+                ScanReport { found: 1, spent: 0 }
+            );
             assert_eq!(wallet.balance().unwrap(), 1_000_000_000);
             assert_eq!(wallet.tree_size().unwrap(), 4);
         }
@@ -1118,7 +1138,10 @@ mod tests {
         let b2 = Block::new(header, vec![spend]);
         let position = note.position;
         let unspent_record = raw_note(&wallet, position);
-        assert_eq!(wallet.scan(&b2).unwrap(), ScanReport { found: 1, spent: 1 });
+        assert_eq!(
+            wallet.scan(&b2, 1, None).unwrap(),
+            ScanReport { found: 1, spent: 1 }
+        );
         assert_eq!(wallet.balance().unwrap(), change);
         assert_eq!(wallet.notes().unwrap().len(), 2);
         let spent_record = raw_note(&wallet, position);
@@ -1168,16 +1191,20 @@ mod tests {
         let b1 = coinbase_block(&mut rng, &owner, b0.hash(), 1, 1_000_000_000);
 
         let full = Wallet::in_memory(&sk(11), BlockHash::ZERO, &mut rng).unwrap();
-        full.scan(&b0).unwrap();
-        full.scan(&b1).unwrap();
+        full.scan(&b0, 1, None).unwrap();
+        full.scan(&b1, 1, None).unwrap();
 
         let light = Wallet::in_memory(&sk(11), BlockHash::ZERO, &mut rng).unwrap();
         assert_eq!(
-            light.scan_compact(&CompactBlock::from_block(&b0)).unwrap(),
+            light
+                .scan_compact(&CompactBlock::from_block(&b0, 1, None).unwrap())
+                .unwrap(),
             ScanReport { found: 0, spent: 0 }
         );
         assert_eq!(
-            light.scan_compact(&CompactBlock::from_block(&b1)).unwrap(),
+            light
+                .scan_compact(&CompactBlock::from_block(&b1, 1, None).unwrap())
+                .unwrap(),
             ScanReport { found: 1, spent: 0 }
         );
 
@@ -1192,7 +1219,7 @@ mod tests {
         assert_eq!(full.unspent().unwrap()[0].memo.to_text(), Some("cb"));
 
         light
-            .scan_compact(&CompactBlock::from_block(&b1))
+            .scan_compact(&CompactBlock::from_block(&b1, 1, None).unwrap())
             .unwrap_err();
     }
 
@@ -1208,8 +1235,16 @@ mod tests {
         let b2 = coinbase_block(&mut rng, &owner, b1.hash(), 2, 9);
         let mut naive = null_crypto::merkle::MerkleTree::new();
         for block in [&b0, &b1, &b2] {
-            wallet.scan(block).unwrap();
-            for leaf in scan_block(&owner, block, 0).unwrap().leaves {
+            wallet.scan(block, 1, None).unwrap();
+            for leaf in scan_block(
+                &owner,
+                block,
+                &tree_transactions(block, 1, None).unwrap(),
+                0,
+            )
+            .unwrap()
+            .leaves
+            {
                 naive.append(leaf).unwrap();
             }
         }
@@ -1229,7 +1264,10 @@ mod tests {
         // Rolling back keeps the older witness valid against the older root.
         wallet.rollback_to(0).unwrap();
         let mut short = null_crypto::merkle::MerkleTree::new();
-        for leaf in scan_block(&owner, &b0, 0).unwrap().leaves {
+        for leaf in scan_block(&owner, &b0, &tree_transactions(&b0, 1, None).unwrap(), 0)
+            .unwrap()
+            .leaves
+        {
             short.append(leaf).unwrap();
         }
         let (path, anchor) = wallet.witness(positions[0]).unwrap();
@@ -1341,7 +1379,7 @@ mod tests {
             )
             .unwrap();
             assert!(watch.keys().is_watch_only());
-            assert_eq!(watch.scan(&b0).unwrap().found, 1);
+            assert_eq!(watch.scan(&b0, 1, None).unwrap().found, 1);
         }
         let watch = Wallet::open(&path, genesis, b"pw").unwrap();
         assert!(watch.keys().is_watch_only());
@@ -1363,5 +1401,51 @@ mod tests {
             Err(Error::WatchOnly)
         ));
         assert!(Wallet::open(&path, genesis, b"nope").is_err());
+    }
+
+    #[test]
+    fn a_mined_reward_is_found_when_it_matures_not_when_mined() {
+        let mut rng = ChaCha20Rng::seed_from_u64(61);
+        let owner = WalletKeys::from_spending_key(sk(61)).unwrap();
+        let wallet = Wallet::in_memory(&sk(61), BlockHash::ZERO, &mut rng).unwrap();
+        let b0 = coinbase_block(&mut rng, &owner, BlockHash::ZERO, 0, 7);
+        let b1 = coinbase_block(&mut rng, &owner, b0.hash(), 1, 8);
+        let b2 = coinbase_block(&mut rng, &owner, b1.hash(), 2, 9);
+        // Maturity two: block 1's reward enters the tree with block 2.
+        wallet.scan(&b0, 2, None).unwrap();
+        wallet.scan(&b1, 2, None).unwrap();
+        assert_eq!(
+            wallet.balance().unwrap(),
+            7,
+            "genesis is exempt, block 1 waits"
+        );
+        let size_before = wallet.tree_size().unwrap();
+
+        let matured = &b1.transactions()[0];
+        assert!(
+            wallet.scan(&b2, 2, None).is_err(),
+            "the maturing coinbase is required"
+        );
+        wallet.scan(&b2, 2, Some(matured)).unwrap();
+        assert_eq!(
+            wallet.balance().unwrap(),
+            7 + 8,
+            "block 2's own reward waits"
+        );
+        let reward = wallet
+            .unspent()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.note.value().raw() == 8)
+            .unwrap();
+        let leaves = size_before..size_before + matured.actions().len() as u64;
+        assert!(
+            leaves.contains(&reward.position),
+            "one of the leaves it just added"
+        );
+        assert_eq!((reward.height, reward.txid), (2, Some(matured.txid())));
+
+        wallet.rollback_to(1).unwrap();
+        assert_eq!(wallet.balance().unwrap(), 7, "a rollback unmatures it");
     }
 }

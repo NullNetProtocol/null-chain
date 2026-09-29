@@ -14,7 +14,9 @@ use null_protocol::block::{Block, BlockHash};
 use null_protocol::bytes::Encodable;
 use null_protocol::compact::CompactBlock;
 use null_protocol::consensus::{next_height, BranchId};
+use null_protocol::maturity::earlier_origin;
 use null_protocol::memo::Memo;
+use null_protocol::transaction::Transaction;
 use null_wallet::keys::WalletKeys;
 use null_wallet::seed::SeedPhrase;
 use null_wallet::spend::{build_payment, Payment};
@@ -359,8 +361,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Balance { wallet, rpc, light } => {
             let mut client = rpc.connect().await?;
             let genesis = fetch_genesis(&mut client).await?;
+            let maturity = network_of(&genesis)?.params().coinbase_maturity;
             let wallet = open_wallet(&wallet, genesis)?;
-            let scanned = sync_wallet(&mut client, &wallet, light).await?;
+            let scanned = sync_wallet(&mut client, &wallet, light, maturity).await?;
             for note in wallet.unspent()? {
                 println!(
                     "note at height {} position {}: {}",
@@ -402,8 +405,9 @@ async fn send(
     let network = network_of(&genesis)?;
     let recipient = Address::decode(to, network.address_prefix())?;
     let wallet = open_wallet(wallet, genesis)?;
-    let scanned = sync_wallet(&mut client, &wallet, light).await?;
-    let branch = network.params().branch_at(next_height(scanned)?);
+    let params = network.params();
+    let scanned = sync_wallet(&mut client, &wallet, light, params.coinbase_maturity).await?;
+    let branch = params.branch_at(next_height(scanned)?);
     let pk = tokio::task::spawn_blocking(ProvingKey::build)
         .await
         .map_err(|_| Error::Stopped)??;
@@ -739,11 +743,19 @@ fn open_wallet_file(path: &Path, genesis: BlockHash) -> Result<Wallet> {
 }
 
 /// Brings the wallet up to the node's tip, rolling back first if the
-/// node's chain diverged from what the wallet scanned. Returns the tip.
+/// node's chain diverged from what the wallet scanned. `maturity` is the
+/// network's coinbase maturity: a full-block scan also fetches the coinbase
+/// maturing at each height, while compact blocks arrive in tree order
+/// already. Returns the tip.
 ///
 /// # Errors
 /// Fails on a control socket or wallet error.
-pub async fn sync_wallet(client: &mut impl Control, wallet: &Wallet, light: bool) -> Result<u32> {
+pub async fn sync_wallet(
+    client: &mut impl Control,
+    wallet: &Wallet,
+    light: bool,
+    maturity: u32,
+) -> Result<u32> {
     let tip = status_height(client).await?;
     let mut height = wallet.next_height()?;
     while height > 0 {
@@ -764,7 +776,12 @@ pub async fn sync_wallet(client: &mut impl Control, wallet: &Wallet, light: bool
         if light {
             wallet.scan_compact(&fetch_compact(client, h).await?)?;
         } else {
-            wallet.scan(&fetch_block(client, h).await?)?;
+            let block = fetch_block(client, h).await?;
+            let earlier = match earlier_origin(h, maturity) {
+                Some(origin) => Some(fetch_coinbase(client, origin).await?),
+                None => None,
+            };
+            wallet.scan(&block, maturity, earlier.as_ref())?;
         }
     }
     Ok(tip)
@@ -803,6 +820,12 @@ async fn status_height(client: &mut impl Control) -> Result<u32> {
         .find_map(|w| w.strip_prefix("height="))
         .and_then(|h| h.parse().ok())
         .ok_or_else(|| Error::Argument("bad status".into()))
+}
+
+/// The coinbase of the main-chain block at `height`.
+async fn fetch_coinbase(client: &mut impl Control, height: u32) -> Result<Transaction> {
+    let hex = client.call(&format!("coinbase {height}")).await?;
+    Ok(Transaction::from_slice(&from_hex(&hex)?)?)
 }
 
 /// The full block at `height`.

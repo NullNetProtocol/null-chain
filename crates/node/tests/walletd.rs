@@ -9,6 +9,8 @@
     clippy::arithmetic_side_effects
 )]
 
+mod common;
+
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -110,10 +112,14 @@ async fn the_wallet_daemon_serves_an_exchange() {
     let t = token.expose();
     let prefix = Network::Test.address_prefix();
 
-    // It syncs and sees the coinbase notes.
-    wait_for(Duration::from_secs(120), async || {
+    // It syncs and sees the coinbase notes once they mature: the rewards
+    // of blocks 1 to 3 have entered the tree by block 12.
+    let three_matured = u64::from(common::first_spendable_height() + 1);
+    wait_for(Duration::from_secs(240), async || {
         let info = call(addr, t, "getwalletinfo", json!([])).await;
-        info["scanned_height"].as_u64().is_some_and(|h| h >= 3)
+        info["scanned_height"]
+            .as_u64()
+            .is_some_and(|h| h >= three_matured)
     })
     .await;
     let info = call(addr, t, "getwalletinfo", json!([])).await;

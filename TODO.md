@@ -93,6 +93,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Incremental commitment tree (frontier only) using `incrementalmerkletree`, root checked against the naive tree
 - [x] Stateful block validation: version, prev/height, median-time and future timestamp, target, PoW, tx root, structure, recent anchors, nullifier freshness, batched signatures and proofs, commitment root
 - [x] Coinbase: first transaction, no spends, outputs equal subsidy plus fees, negative public balance
+- [x] Coinbase maturity by delayed tree insertion: rewards enter the tree at `h + M - 1`, spendable at `h + M` (M = 100 main, 10 test), genesis exempt; one ordering function for validator, miner, wallets, compact blocks (2026-09-29)
 - [x] Proofs and signatures are verified in one batch each per block; Halo2's batch verifier is multi-threaded through its `multicore` feature
 - [x] Reorg handling and chain selection by cumulative work, with rollback on an invalid branch
 - [x] Checkpoints per network (list empty until launch), reorganizations refused below a checkpoint or deeper than `max_reorg_depth`, frontiers pruned beyond that depth

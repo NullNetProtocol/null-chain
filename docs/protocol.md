@@ -150,7 +150,8 @@ count: 8672, 14432, 25952 or 48992 bytes. A light client may instead
 fetch compact blocks, which carry per action the nullifier, the note
 commitment, the ephemeral key and the leading 52 bytes of the note
 ciphertext, enough to detect notes and rebuild the commitment tree
-without the memo. There is no locktime, expiry,
+without the memo. Their actions are those the block appends, in tree
+order, so a maturing coinbase appears in the block it matures in. There is no locktime, expiry,
 fee, or length prefix on the proof.
 
 ```
@@ -197,9 +198,20 @@ version (1) = 1 || prev_hash (32) || LE32(height) || LE64(timestamp)
 
 `block_hash = BLAKE2b-256[BLOCK_HASH](header)`; `tx_root =
 BLAKE2b-256[TX_ROOT](txid_1 || txid_2 || ...)`; `commitment_root` is the
-tree root after appending every `cmx` of the block in order, coinbase
-first. A block is the header, `LE32(count)`, then the transactions; at
+tree root after appending the `cmx` of the block's outputs in tree order
+(below). A block is the header, `LE32(count)`, then the transactions; at
 most 512 transactions.
+
+Coinbase maturity. The outputs of the coinbase at height `h >= 1` enter the
+tree while block `h + M - 1` is applied, where `M` is the network's
+`coinbase_maturity` (100 on mainnet, 10 on test), and are first spendable
+in block `h + M`. So block `H >= 1` appends, in order, every `cmx` of the
+coinbase of block `H - M + 1` if that height is at least 1, then every
+`cmx` of its own transactions after its coinbase; its own coinbase waits.
+Genesis appends all its outputs at once. With `M = 1` this is plain block
+order. A note is only spendable against a root that contains it, so no
+spend rule is needed, and a matured coinbase output is a note like any
+other.
 
 Genesis has height 0, previous hash zero, the limit target, no proof of
 work, and one transaction: the coinbase paying the premine, a coinbase
@@ -233,7 +245,8 @@ timestamp exceeds the median of the last eleven and is at most two hours
 ahead of the validator's clock; the target equals the difficulty rule's
 output; valid proof of work; `tx_root` matches; one to 512 transactions;
 every transaction valid per section 8 with the coinbase rule; the header's
-`commitment_root` equals the tree after the block.
+`commitment_root` equals the tree after the block, built in tree order with
+the coinbase maturing at its height.
 
 Nodes refuse reorganizations that revert a checkpoint or exceed 200
 blocks.

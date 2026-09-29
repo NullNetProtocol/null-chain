@@ -20,10 +20,11 @@ From `ChainParams::mainnet()` / `::test()` in `crates/chain/src/params.rs`.
 | Anchor max age | 100 blocks | 100 blocks | how long a commitment root stays a valid anchor |
 | Max future drift | 7200 s (2 h) | 7200 s (2 h) | how far ahead a block timestamp may be |
 | Max reorg depth | 200 blocks | 200 blocks | deepest reorg accepted; older frontiers pruned |
+| Coinbase maturity | 100 blocks | 10 blocks | a reward mined at `h` enters the note tree at `h + M - 1` and is spendable at `h + M`; genesis exempt |
 | Checkpoints | none | none | *provisional* — filled at launch |
 | Genesis branch id | `0x4d41494e` | `0x54455354` | rule-set id bound into every sighash; differs per network |
 | Upgrades | none | none | scheduled `(height, branch)` activations, see `docs/upgrades.md` |
-| Seed peers | none | none | *provisional* — pass `--connect`/`--seed` meanwhile |
+| Seed peers | `seed1`–`seed5.nullnet.sh:19000` | none | resolved when dialed; pass `--connect`/`--seed` on test |
 
 Genesis is unmined (limit target, no PoW) and identified by hash. It
 carries one transaction, the coinbase paying the premine (below); its

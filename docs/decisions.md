@@ -1069,3 +1069,40 @@ anyone seeing two of a node's connections, say one over Tor and one over
 clearnet, link them. Alternative considered: marking any outbound peer still
 handshaking when an inbound self-connection appears, which can blame the
 wrong seed when several dials are in flight and would then never retry it.
+
+## 2026-09-29: Coinbase maturity by delaying the note tree
+
+Without maturity a miner could spend a reward in the next block, and a
+reorganization that orphaned the block would erase that reward and every
+payment built on it, downstream to people who cannot tell, since every
+note is shielded. Transparent chains stop this by refusing spends of young
+coinbase outputs (100 blocks in Bitcoin and Zcash).
+
+A spend rule does not work here: a shielded spend does not reveal which
+note it spends, so the circuit would have to prove the note is not a young
+coinbase, which needs a coinbase flag in the note commitment (a
+fingerprint) and a circuit change. Instead the coinbase outputs of block
+`h` enter the commitment tree only while block `h + M - 1` is applied,
+before that block's own outputs. A note is only spendable against a root
+that contains it, so it is first spendable in block `h + M`. Nothing about
+the note changes and the circuit is untouched; once in the tree a matured
+reward is a note like any other. M is 100 on mainnet (about 3 h 20 min)
+and 10 on test, so the test network and tests exercise the rule quickly.
+Genesis is exempt so the premine and both genesis hashes are unchanged.
+
+One function, `null_protocol::maturity::tree_transactions`, gives the
+order for the validator, the miner's template, wallets, and compact
+blocks, so they cannot disagree; with `M = 1` it is the old block order.
+Whoever applies a block supplies the maturing coinbase: the validator and
+miner from the stored main chain (blocks apply in order, so a
+reorganization sees its own branch), full-block wallets through a new
+`coinbase <height>` control command, and light wallets get compact blocks
+already in tree order. Wallets keep no pending state, so rollback is
+unchanged, and a mined reward appears in the wallet when it matures.
+
+Alternatives considered: requiring every anchor to be M blocks old, which
+enforces maturity without reordering but delays every spend of any fresh
+note by M blocks; and a wallet-only policy, which protects honest wallets
+but not recipients of a modified one. This is a consensus change: chains
+built under the old order are invalid and must be restarted.
+

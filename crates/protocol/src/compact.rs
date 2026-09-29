@@ -12,9 +12,11 @@ use null_crypto::encryption::EphemeralPublicKey;
 
 use crate::block::{Block, BlockHash};
 use crate::bytes::{Encodable, Reader, Writer};
+use crate::maturity::tree_transactions;
 use crate::note::ExtractedNoteCommitment;
 use crate::note_encryption::COMPACT_NOTE_LEAD;
 use crate::nullifier::Nullifier;
+use crate::transaction::Transaction;
 use crate::{Error, Result};
 
 /// One action, stripped to what a light client reads.
@@ -59,16 +61,23 @@ pub struct CompactBlock {
     pub height: u32,
     /// The block hash, so a light client can track reorgs.
     pub hash: BlockHash,
-    /// The actions of every transaction, coinbase first, in order.
+    /// The actions whose commitments the block appends, in tree order: a
+    /// maturing coinbase from an earlier block first, then the block's own
+    /// transactions after its coinbase (see [`crate::maturity`]).
     pub actions: Vec<CompactAction>,
 }
 
 impl CompactBlock {
-    /// Reduces a full block to its compact form.
-    #[must_use]
-    pub fn from_block(block: &Block) -> Self {
+    /// Reduces a full block to its compact form on a network whose coinbase
+    /// matures after `maturity` blocks. `earlier` is the maturing coinbase
+    /// from an earlier block, as [`tree_transactions`] requires.
+    ///
+    /// # Errors
+    /// Returns [`Error::InvalidBlock`] if `earlier` does not fit the rule.
+    pub fn from_block(block: &Block, maturity: u32, earlier: Option<&Transaction>) -> Result<Self> {
+        let tree = tree_transactions(block, maturity, earlier)?;
         let mut actions = Vec::new();
-        for tx in block.transactions() {
+        for tx in tree {
             for action in tx.actions() {
                 let body = action.body();
                 let mut enc_lead = [0u8; COMPACT_NOTE_LEAD];
@@ -82,11 +91,11 @@ impl CompactBlock {
                 });
             }
         }
-        Self {
+        Ok(Self {
             height: block.header().height,
             hash: block.hash(),
             actions,
-        }
+        })
     }
 }
 

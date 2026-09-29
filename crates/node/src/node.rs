@@ -9,7 +9,7 @@ use null_chain::chain::{Chain, Import};
 use null_chain::mempool::Mempool;
 use null_chain::params::ChainParams;
 use null_chain::target::{Target, U256};
-use null_chain::validate::{header_lookback, recent_headers};
+use null_chain::validate::{earlier_coinbase, header_lookback, recent_headers};
 use null_circuit::proof::VerifyingKey;
 use null_p2p::addrbook::AddressBook;
 use null_p2p::dandelion::{Dandelion, Route};
@@ -119,6 +119,9 @@ pub enum Request {
     Block(u32),
     /// A compact block by height, for light clients.
     Compact(u32),
+    /// The coinbase of the main-chain block at a height, which wallets
+    /// scanning full blocks need when it matures.
+    Coinbase(u32),
     /// The hash of the block at a height, for cheap reorg checks.
     Hash(u32),
     /// Submit a transaction.
@@ -249,6 +252,8 @@ pub enum Response {
     Block(Option<Box<Block>>),
     /// A compact block, if present.
     Compact(Option<Box<LightBlock>>),
+    /// A coinbase transaction, if its block is present.
+    Coinbase(Option<Box<Transaction>>),
     /// A block hash, if present.
     Hash(Option<BlockHash>),
     /// The submitted transaction's id.
@@ -1249,6 +1254,15 @@ impl Node {
         })
     }
 
+    /// The main-chain block at `height`, if the chain reaches it.
+    fn block_at(&self, height: u32) -> Result<Option<Block>> {
+        let store = self.chain.store();
+        Ok(match store.hash_at(height)? {
+            Some(hash) => store.block(&hash)?,
+            None => None,
+        })
+    }
+
     fn template(&mut self) -> Result<Template> {
         let tip = self.chain.tip()?;
         let store = self.chain.store();
@@ -1259,6 +1273,7 @@ impl Node {
             .clone();
         let recent = recent_headers(store, tip.height, header_lookback(&self.params))?;
         let tree = store.tree()?;
+        let earlier = earlier_coinbase(store, &self.params, next_height(tip.height)?)?;
         let transactions = self.mempool.select(
             store,
             &self.params,
@@ -1269,6 +1284,7 @@ impl Node {
             recent,
             tree,
             transactions,
+            earlier,
             params: self.params,
             now: now(),
         })
@@ -1581,24 +1597,22 @@ impl Node {
                 Ok(Response::BlockSubmitted(self.on_block(None, &block)?))
             }
             Request::MiningInfo => Ok(Response::MiningInfo(Box::new(self.mining_info()?))),
-            Request::Block(height) => {
-                let store = self.chain.store();
-                let block = match store.hash_at(height)? {
-                    Some(hash) => store.block(&hash)?,
-                    None => None,
-                };
-                Ok(Response::Block(block.map(Box::new)))
-            }
+            Request::Block(height) => Ok(Response::Block(self.block_at(height)?.map(Box::new))),
             Request::Compact(height) => {
-                let store = self.chain.store();
-                let block = match store.hash_at(height)? {
-                    Some(hash) => store.block(&hash)?,
-                    None => None,
+                let Some(block) = self.block_at(height)? else {
+                    return Ok(Response::Compact(None));
                 };
-                Ok(Response::Compact(
-                    block.map(|b| Box::new(LightBlock::from_block(&b))),
-                ))
+                let store = self.chain.store();
+                let earlier = earlier_coinbase(store, &self.params, height)?;
+                let maturity = self.params.coinbase_maturity;
+                let compact = LightBlock::from_block(&block, maturity, earlier.as_ref())?;
+                Ok(Response::Compact(Some(Box::new(compact))))
             }
+            Request::Coinbase(height) => Ok(Response::Coinbase(
+                self.block_at(height)?
+                    .and_then(|b| b.transactions().first().cloned())
+                    .map(Box::new),
+            )),
             Request::Hash(height) => Ok(Response::Hash(self.chain.store().hash_at(height)?)),
             Request::Submit(tx) => {
                 let txid = tx.txid();

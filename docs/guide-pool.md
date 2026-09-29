@@ -12,8 +12,10 @@ a pool cannot assemble it. The node builds and proves the coinbase for
 your payout address and hands you a finished header to grind. You send
 back only what you changed: timestamp, nonce and solution. Payouts to
 miners are shielded sends through the wallet daemon, fifteen per
-transaction. There is no coinbase maturity; a mined block's reward is
-spendable in the next block.
+transaction. A mined block's reward matures after 100 blocks on mainnet
+(`coinbase_maturity` in `getblockchaininfo`): it enters the note tree at
+height `h + 99`, the wallet daemon finds it then, and it is spendable from
+`h + 100`.
 
 ## 1. Run a synced node with JSON-RPC
 
