@@ -105,6 +105,8 @@ Tick an item only when it has tests and passes clippy.
 - [x] Address book: bounded, timestamp-sanitized gossip, bans, failure-aware candidates
 - [x] Peer state: handshake, keepalive, misbehavior score to ban
 - [x] Seed list per network, `--seed`, hostnames resolved at dial time; main network seeds `seed1`–`seed5.nullnet.sh:19000` (2026-09-28)
+- [x] Rules digest covers every consensus parameter and `CONSENSUS_REVISION`; a mismatching chain is refused naming its directory (2026-09-29)
+- [x] Bans per IP (loopback and proxied peers exempt), bounded ban list; peer-closed connections logged with duration (2026-09-29)
 - [x] Never redial ourselves: skip seed names resolving to our listen address; per-connection version nonces identify other routes back to us (2026-09-28)
 - [x] Peer discovery bootstraps: dialed peers enter the address book and are gossiped, so a node reaches peers it was never configured with (self-advertising the listen address is future work)
 - [x] Headers-first sync state machine: locator, chained header acceptance, bounded in-flight block requests with timeouts

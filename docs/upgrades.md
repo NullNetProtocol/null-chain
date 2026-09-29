@@ -62,11 +62,18 @@ stays on the old chain: a hard fork, visible in its logs.
 
 ## Late upgrades and downgrades
 
-The chain database records a digest of the rules it was built under: the
+The chain database records a digest of the rules it was built under:
+`CONSENSUS_REVISION`, every consensus parameter (proof-of-work, difficulty,
+anchor age, reorganization depth, coinbase maturity, checkpoints), the
 genesis branch, the upgrade schedule and the circuit's verifying key. A
-binary whose digest differs refuses to open the database with
-`store was built under different consensus rules or circuit; delete it
-and resync`. That covers the operator who installs a new release after
+binary whose digest differs refuses to open the database; `nulld` and the
+desktop app name the chain directory to delete and resync.
+
+`CONSENSUS_REVISION` in `crates/chain/src/chain.rs` covers what the
+parameters cannot: a change to how blocks are validated or applied. Bump
+it in the same commit as any such change, or stores built under the old
+logic are served as if valid, as happened when coinbase maturity reordered
+the commitment tree. That covers the operator who installs a new release after
 having mined or followed the old chain past the activation height, and
 the operator who downgrades: in both cases blocks applied under the other
 rules are not silently trusted. A database with history but no recorded

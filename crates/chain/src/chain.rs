@@ -230,14 +230,40 @@ impl Chain {
     }
 }
 
+/// Revision of the validation logic. Bump it in the same commit as any
+/// change to how blocks are validated or applied that the parameters do not
+/// capture, so stores built by earlier binaries are refused instead of
+/// served. 2: coinbase maturity reorders the commitment tree.
+pub const CONSENSUS_REVISION: u32 = 2;
+
 /// Digest of everything that decides whether an applied block was valid:
-/// the genesis branch, the upgrade schedule and the verifying key.
+/// [`CONSENSUS_REVISION`], every consensus parameter, the genesis branch,
+/// the upgrade schedule, the checkpoints and the verifying key.
 pub fn rules_digest(params: &ChainParams, vk: &VerifyingKey) -> [u8; 32] {
     let mut w = Writer::default();
+    w.put(&CONSENSUS_REVISION.to_le_bytes());
+    w.put(&params.equihash.n().to_le_bytes());
+    w.put(&params.equihash.k().to_le_bytes());
+    w.put(&params.pow_limit.to_compact().to_le_bytes());
+    w.put(&params.block_interval.to_le_bytes());
+    w.put(
+        &u64::try_from(params.difficulty_window)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    w.put(&params.genesis_timestamp.to_le_bytes());
+    w.put(&params.anchor_max_age.to_le_bytes());
+    w.put(&params.max_future_seconds.to_le_bytes());
+    w.put(&params.max_reorg_depth.to_le_bytes());
+    w.put(&params.coinbase_maturity.to_le_bytes());
     w.put(&params.genesis_branch.to_bytes());
     for upgrade in params.upgrades {
         w.put(&upgrade.height.to_le_bytes());
         w.put(&upgrade.branch.to_bytes());
+    }
+    for checkpoint in params.checkpoints {
+        w.put(&checkpoint.height.to_le_bytes());
+        w.put(checkpoint.hash.as_bytes());
     }
     blake2b_short(
         RULES,
@@ -282,6 +308,20 @@ mod tests {
             ..base
         };
         assert_ne!(rules_digest(&base, &vk), rules_digest(&scheduled, &vk));
+        let other_maturity = ChainParams {
+            coinbase_maturity: base.coinbase_maturity + 1,
+            ..base
+        };
+        assert_ne!(
+            rules_digest(&base, &vk),
+            rules_digest(&other_maturity, &vk),
+            "a store built with another maturity is refused"
+        );
+        let other_limit = ChainParams {
+            max_reorg_depth: base.max_reorg_depth + 1,
+            ..base
+        };
+        assert_ne!(rules_digest(&base, &vk), rules_digest(&other_limit, &vk));
         let other_branch = ChainParams {
             genesis_branch: BranchId::new(4),
             ..base

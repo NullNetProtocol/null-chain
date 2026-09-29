@@ -285,6 +285,16 @@ struct PeerHandle {
     outbox: mpsc::Sender<Message>,
     addr: SocketAddr,
     target: String,
+    /// When the connection finished its handshake.
+    connected_at: std::time::Instant,
+}
+
+impl PeerHandle {
+    /// How a log line names the peer: direction and what was dialed, or
+    /// the remote address for inbound peers.
+    fn describe(&self) -> String {
+        format!("{:?} {}", self.peer.direction(), self.target)
+    }
 }
 
 /// A compact block waiting for transactions.
@@ -543,7 +553,14 @@ async fn open_chain(config: &Config, params: ChainParams) -> Result<Chain> {
     let vk: VerifyingKey = tokio::task::spawn_blocking(VerifyingKey::build)
         .await
         .map_err(|_| Error::Stopped)??;
-    Ok(Chain::new(store, params, vk)?)
+    Chain::new(store, params, vk).map_err(|error| match (error, &config.datadir) {
+        (null_chain::Error::RulesMismatch, Some(dir)) => Error::Argument(format!(
+            "the chain in {} was built under different consensus rules, for example \
+             by an older version; delete that directory and restart to resync",
+            dir.display()
+        )),
+        (error, _) => error.into(),
+    })
 }
 
 /// Binds a listener when an address is configured, returning it with
@@ -557,6 +574,20 @@ async fn bind(addr: Option<SocketAddr>) -> Result<Option<(TcpListener, SocketAdd
         }
         None => Ok(None),
     }
+}
+
+/// The log line for a connection the peer closed.
+fn closed_by_peer(id: PeerId, who: &str, lasted_seconds: u64) -> String {
+    format!("peer {id} ({who}) closed the connection after {lasted_seconds} s")
+}
+
+/// Whether banning `addr`'s IP stops only the peer that misbehaved. Not
+/// for outbound peers reached through the proxy or the SAM bridge, whose
+/// address is the transport's, nor for loopback: every inbound peer of a
+/// Tor hidden service arrives from 127.0.0.1, so one bad onion peer would
+/// lock out all of them. Such peers are still disconnected.
+fn bannable(addr: SocketAddr, via_transport: bool) -> bool {
+    !via_transport && !addr.ip().is_loopback()
 }
 
 fn addr_key(addr: SocketAddr) -> ([u8; 16], u16) {
@@ -599,6 +630,13 @@ impl Node {
             } => self.on_connected(id, direction, addr, target, outbox),
             Event::Message { id, message } => self.on_message(id, *message),
             Event::Disconnected { id } => {
+                // A peer still here was not dropped by us: the other side
+                // closed, or the connection failed. Say so, since a peer
+                // refusing our blocks looks otherwise like a quiet redial.
+                if let Some(handle) = self.peers.get(&id) {
+                    let lasted = handle.connected_at.elapsed().as_secs();
+                    log(&closed_by_peer(id, &handle.describe(), lasted));
+                }
                 self.remove_peer(id);
                 Ok(())
             }
@@ -663,7 +701,7 @@ impl Node {
                 .values()
                 .filter(|h| h.peer.direction() == Direction::Inbound)
                 .count();
-            if inbound >= self.max_inbound || self.book.is_banned(addr_key(addr), now()) {
+            if inbound >= self.max_inbound || self.book.is_banned(&addr_key(addr).0, now()) {
                 return Ok(());
             }
         }
@@ -679,6 +717,7 @@ impl Node {
                 outbox,
                 addr,
                 target,
+                connected_at: std::time::Instant::now(),
             },
         );
         self.apply_peer_events(id, events);
@@ -715,7 +754,11 @@ impl Node {
                         self.forget_self_peer(id);
                         continue;
                     }
-                    log(&format!("peer {id}: disconnect ({reason})"));
+                    let who = self.peers.get(&id).map(PeerHandle::describe);
+                    log(&format!(
+                        "peer {id} ({}): disconnecting, {reason}",
+                        who.unwrap_or_default()
+                    ));
                     if ban {
                         self.ban(id);
                     }
@@ -725,20 +768,17 @@ impl Node {
         }
     }
 
-    /// Bans a peer's address, unless it is an outbound peer reached
-    /// through the proxy, whose address is the proxy's.
+    /// Bans a peer's IP for every port, unless that IP is shared by other
+    /// peers (see [`bannable`]).
     fn ban(&mut self, id: PeerId) {
         let Some(handle) = self.peers.get(&id) else {
             return;
         };
-        // Outbound peers reached through the proxy or the SAM bridge share
-        // that address; banning it would ban the whole transport.
-        if handle.peer.direction() == Direction::Outbound
-            && (self.proxy.is_some() || self.i2p.is_some())
-        {
-            return;
+        let via_transport = handle.peer.direction() == Direction::Outbound
+            && (self.proxy.is_some() || self.i2p.is_some());
+        if bannable(handle.addr, via_transport) {
+            self.book.ban(addr_key(handle.addr).0, now());
         }
-        self.book.ban(addr_key(handle.addr), now());
     }
 
     fn on_ready(&mut self, id: PeerId, info: &VersionInfo) {
@@ -1791,5 +1831,55 @@ mod tests {
         let dials = accepted.load(std::sync::atomic::Ordering::SeqCst);
         node.shutdown().await;
         assert_eq!(dials, 1, "the relay back to ourselves was redialed");
+    }
+
+    #[tokio::test]
+    async fn a_chain_from_other_consensus_rules_is_refused_naming_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_dir = dir.path().join("chain");
+        std::fs::create_dir_all(&chain_dir).unwrap();
+        // Stamp the store as a binary with another maturity would.
+        let other = ChainParams {
+            coinbase_maturity: 1,
+            ..ChainParams::test()
+        };
+        let store = Store::open(chain_dir.join("chain.redb")).unwrap();
+        let vk = VerifyingKey::build().unwrap();
+        drop(Chain::new(store, other, vk).unwrap());
+
+        let refused = spawn(Config {
+            datadir: Some(chain_dir.clone()),
+            ..Config::test()
+        })
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(refused.contains("different consensus rules"), "{refused}");
+        assert!(
+            refused.contains(&chain_dir.display().to_string()),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn shared_addresses_are_never_banned() {
+        let public: SocketAddr = "46.19.141.66:51234".parse().unwrap();
+        assert!(bannable(public, false));
+        assert!(
+            !bannable(public, true),
+            "the proxy's or SAM bridge's address"
+        );
+        for tor in ["127.0.0.1:40000", "[::1]:40000"] {
+            assert!(!bannable(tor.parse().unwrap(), false), "{tor}");
+        }
+    }
+
+    #[test]
+    fn a_peer_closing_the_connection_is_named_with_how_long_it_lasted() {
+        assert_eq!(
+            closed_by_peer(6, "Outbound seed1.nullnet.sh:19000", 0),
+            "peer 6 (Outbound seed1.nullnet.sh:19000) closed the connection after 0 s"
+        );
     }
 }

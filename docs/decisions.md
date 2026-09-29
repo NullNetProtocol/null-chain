@@ -1106,3 +1106,29 @@ note by M blocks; and a wallet-only policy, which protects honest wallets
 but not recipients of a modified one. This is a consensus change: chains
 built under the old order are invalid and must be restarted.
 
+## 2026-09-29: Refuse stores from other rules; ban by IP; log closes
+
+A node started on a chain from before coinbase maturity opened it without
+complaint: the rules digest covered only the branch, the upgrade schedule
+and the circuit. It then served blocks the seeds rejected. Each rejecting
+seed dropped it, and it redialed every five seconds. Its log showed only
+successful handshakes, because a close by the remote side was not logged.
+Three changes:
+
+- The digest now also covers every consensus parameter and a
+  `CONSENSUS_REVISION` constant, bumped with any validation change the
+  parameters do not capture. The node refuses a mismatching store and
+  names the directory to delete. Every store stamped before this change
+  mismatches once.
+- Bans are per IP in a separate bounded list, not on the address-book
+  entry for `ip:port`. An inbound peer connects from a new ephemeral port
+  each time, so a port-level ban never matched it again, and the ban also
+  planted that port in the book as a dial candidate. Loopback is never
+  banned, because all Tor hidden-service inbound arrives from 127.0.0.1
+  and one bad onion peer would lock out the rest. Peers reached through a
+  proxy stay exempt as before. Such peers are still disconnected.
+  Alternative considered: per-subnet bans, which cost honest peers behind
+  shared addresses more and can be added later.
+- A connection the peer closes is logged with its direction, target and
+  duration, and disconnects we initiate name the peer too.
+

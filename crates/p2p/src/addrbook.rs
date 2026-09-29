@@ -14,18 +14,26 @@ pub const MAX_FUTURE: u64 = 10 * 60;
 pub const MAX_AGE: u64 = 30 * 24 * 60 * 60;
 /// Default ban length in seconds.
 pub const BAN_SECONDS: u64 = 24 * 60 * 60;
+/// Banned IP addresses the book remembers at most.
+pub const MAX_BANS: usize = 10_000;
+
+/// An IP address as the book stores it: IPv4 as IPv4-mapped IPv6.
+pub type Ip = [u8; 16];
 
 #[derive(Clone, Copy, Debug)]
 struct Entry {
     addr: PeerAddr,
-    banned_until: u64,
     failures: u32,
 }
 
 /// The address book.
 #[derive(Debug, Default)]
 pub struct AddressBook {
-    entries: HashMap<([u8; 16], u16), Entry>,
+    entries: HashMap<(Ip, u16), Entry>,
+    /// Ban expiry per IP. Bans are per IP, not per address: an inbound
+    /// peer connects from a new ephemeral port every time, so a ban on
+    /// its port would never match again.
+    bans: HashMap<Ip, u64>,
 }
 
 impl AddressBook {
@@ -59,14 +67,7 @@ impl AddressBook {
         if self.entries.len() >= MAX_KNOWN {
             return false;
         }
-        self.entries.insert(
-            addr.key(),
-            Entry {
-                addr,
-                banned_until: 0,
-                failures: 0,
-            },
-        );
+        self.entries.insert(addr.key(), Entry { addr, failures: 0 });
         true
     }
 
@@ -80,26 +81,26 @@ impl AddressBook {
             .count()
     }
 
-    /// Bans an address until `now + BAN_SECONDS`.
-    pub fn ban(&mut self, key: ([u8; 16], u16), now: u64) {
-        let until = now.saturating_add(BAN_SECONDS);
-        self.entries
-            .entry(key)
-            .and_modify(|e| e.banned_until = until)
-            .or_insert(Entry {
-                addr: PeerAddr {
-                    ip: key.0,
-                    port: key.1,
-                    last_seen: now,
-                },
-                banned_until: until,
-                failures: 0,
-            });
+    /// Bans every port of `ip` until `now + BAN_SECONDS`. When the ban
+    /// list is full, expired bans go first, then the one ending soonest.
+    pub fn ban(&mut self, ip: Ip, now: u64) {
+        if !self.bans.contains_key(&ip) && self.bans.len() >= MAX_BANS {
+            self.bans.retain(|_, until| *until > now);
+            let soonest = self
+                .bans
+                .iter()
+                .min_by_key(|(_, until)| **until)
+                .map(|(ip, _)| *ip);
+            if let (true, Some(soonest)) = (self.bans.len() >= MAX_BANS, soonest) {
+                self.bans.remove(&soonest);
+            }
+        }
+        self.bans.insert(ip, now.saturating_add(BAN_SECONDS));
     }
 
-    /// Whether an address is banned at `now`.
-    pub fn is_banned(&self, key: ([u8; 16], u16), now: u64) -> bool {
-        self.entries.get(&key).is_some_and(|e| e.banned_until > now)
+    /// Whether `ip` is banned at `now`.
+    pub fn is_banned(&self, ip: &Ip, now: u64) -> bool {
+        self.bans.get(ip).is_some_and(|until| *until > now)
     }
 
     /// Records a failed connection attempt.
@@ -128,7 +129,7 @@ impl AddressBook {
         let mut pool: Vec<&Entry> = self
             .entries
             .values()
-            .filter(|e| e.banned_until <= now && !exclude.contains(&e.addr.key()))
+            .filter(|e| !self.is_banned(&e.addr.ip, now) && !exclude.contains(&e.addr.key()))
             .collect();
         if pool.is_empty() {
             return None;
@@ -150,7 +151,7 @@ impl AddressBook {
         let mut pool: Vec<PeerAddr> = self
             .entries
             .values()
-            .filter(|e| e.banned_until <= now)
+            .filter(|e| !self.is_banned(&e.addr.ip, now))
             .map(|e| e.addr)
             .collect();
         for i in (1..pool.len()).rev() {
@@ -164,7 +165,8 @@ impl AddressBook {
     /// Forgets addresses unseen for longer than [`MAX_AGE`] and expired bans.
     pub fn prune(&mut self, now: u64) {
         self.entries
-            .retain(|_, e| e.banned_until > now || now.saturating_sub(e.addr.last_seen) <= MAX_AGE);
+            .retain(|_, e| now.saturating_sub(e.addr.last_seen) <= MAX_AGE);
+        self.bans.retain(|_, until| *until > now);
     }
 }
 
@@ -201,12 +203,45 @@ mod tests {
     fn bans_exclude_candidates_and_samples_until_they_expire() {
         let mut book = AddressBook::new();
         book.add(addr(1, 100), 100);
-        book.ban(addr(1, 0).key(), 100);
+        book.ban(addr(1, 0).ip, 100);
         let mut rng = ChaCha20Rng::seed_from_u64(2);
-        assert!(book.is_banned(addr(1, 0).key(), 100));
+        assert!(book.is_banned(&addr(1, 0).ip, 100));
         assert!(book.candidate(&[], 100, &mut rng).is_none());
         assert!(book.sample(5, 100, &mut rng).is_empty());
         assert!(book.candidate(&[], 100 + BAN_SECONDS, &mut rng).is_some());
+        book.prune(100 + BAN_SECONDS);
+        assert!(!book.is_banned(&addr(1, 0).ip, 100 + BAN_SECONDS));
+    }
+
+    #[test]
+    fn a_ban_covers_every_port_of_the_ip_and_adds_no_address() {
+        let mut book = AddressBook::new();
+        let inbound = PeerAddr::v4([10, 0, 0, 9], 51_234, 100);
+        book.ban(inbound.ip, 100);
+        let reconnect = PeerAddr::v4([10, 0, 0, 9], 51_999, 100);
+        assert!(book.is_banned(&reconnect.ip, 100), "a new ephemeral port");
+        assert!(!book.is_banned(&addr(1, 0).ip, 100), "other IPs are fine");
+        assert!(
+            book.is_empty(),
+            "a banned inbound port is not a dial candidate"
+        );
+    }
+
+    #[test]
+    fn the_ban_list_is_bounded_and_evicts_the_ban_ending_soonest() {
+        let mut book = AddressBook::new();
+        let ip = |i: usize| {
+            let mut ip = [0u8; 16];
+            ip[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            ip
+        };
+        for i in 0..MAX_BANS {
+            book.ban(ip(i), i as u64);
+        }
+        book.ban(ip(MAX_BANS), MAX_BANS as u64);
+        assert_eq!(book.bans.len(), MAX_BANS);
+        assert!(!book.is_banned(&ip(0), 0), "the earliest ban made room");
+        assert!(book.is_banned(&ip(MAX_BANS), MAX_BANS as u64));
     }
 
     #[test]
