@@ -84,7 +84,7 @@ mod tests {
         assert_eq!(a.check_tx_root(), Ok(()));
         assert_eq!(
             a.hash().to_string(),
-            "6c49fc018f0f7d2ee744e55c28df974b96c8daa68a7b5f3ee52b60cba31d14d6",
+            "a47d659978361de625cfb4d84641b4f2de6f69ef04338e52612e5f8d95853c92",
             "genesis changed; update deliberately"
         );
     }

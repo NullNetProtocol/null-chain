@@ -1551,7 +1551,9 @@ mod tests {
         assert_eq!(daemon.wallet().operation(op.id).unwrap(), pending);
         // A newly present note at a formerly locked position is insufficient:
         // the nullifier must belong to every previous transaction attempt.
-        assert!(daemon.excluded_positions(&op).unwrap().contains(&0));
+        // The builder shuffles actions, so the premine's position varies.
+        let premine = daemon.wallet().unspent().unwrap()[0].position;
+        assert!(daemon.excluded_positions(&op).unwrap().contains(&premine));
     }
 
     #[tokio::test]

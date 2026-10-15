@@ -131,9 +131,8 @@ impl ChainParams {
             address_prefix: AddressPrefix::Main,
             genesis_branch: BranchId::new(0x4d41_494e),
             upgrades: &[],
-            // Pays the premine to a placeholder whose key was discarded:
-            // regenerate with the real development fund address before
-            // launch (`nulld genesis-coinbase`), see docs/params.md.
+            // Pays the premine to the development fund address in
+            // docs/params.md, whose key is held offline.
             genesis_coinbase: Some(include_bytes!("genesis/main.tx")),
         }
     }

@@ -36,12 +36,13 @@ genesis hash, which must then be re-pinned. On the test network the
 premine pays the all-zero seed phrase's account 0, whose spending key is
 `aeee2840de33f371c576fdde22e552725f6e7002c642a64cbfbaa71679dddaf3`
 (address `tnull1qgwtwmahzrkmyrl08tf65wtp0m4tjdvyv3x26f5762mufvljfgjqkvyfas5u3stpavsnjmdzm47`),
-so anyone can fund a test wallet from it. On mainnet it pays a
-*placeholder* address whose key was discarded: **regenerate it with the
-real development fund address before launch**, or the premine is burned.
+so anyone can fund a test wallet from it. On mainnet it pays the
+development fund address
+`null1z0z9psxvllg396329fcj546gt3dya32zjcxf3w3gg78x2lgffxhgz2snzw6wuwzk930pzv4cvfn`,
+whose key is held offline by the project.
 The mainnet genesis hash is pinned in
 `crates/chain/src/genesis.rs`:
-`6c49fc018f0f7d2ee744e55c28df974b96c8daa68a7b5f3ee52b60cba31d14d6`.
+`a47d659978361de625cfb4d84641b4f2de6f69ef04338e52612e5f8d95853c92`.
 
 ## Money and emission
 
@@ -52,8 +53,8 @@ schedule is *provisional*.
 |---|---|
 | `COIN` | 100,000,000 units |
 | `MAX_MONEY` | 21,000,000 coins |
-| Premine (development fund) | 1,050,000 coins, 5% of `MAX_MONEY`, paid by the genesis coinbase |
-| Initial block subsidy | 9.5 coins |
+| Premine (development fund) | 630,000 coins, 3% of `MAX_MONEY`, paid by the genesis coinbase |
+| Initial block subsidy | 9.7 coins |
 | Halving interval | 1,050,000 blocks (~4 years at 120 s blocks; emission plus premine sums to `MAX_MONEY`) |
 | Genesis subsidy | 0 (the premine is not a subsidy; `subsidy(0)` stays zero) |
 

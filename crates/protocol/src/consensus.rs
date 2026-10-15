@@ -40,15 +40,15 @@ pub const POW_SOLUTION_LEN: usize = 100;
 pub const MAX_BLOCK_TRANSACTIONS: usize = 512;
 
 /// The development fund paid by the genesis coinbase, in smallest units:
-/// five percent of `MAX_MONEY`, carved out of the emission below so the
+/// three percent of `MAX_MONEY`, carved out of the emission below so the
 /// cap holds. Provisional. The genesis transaction that pays it is
 /// embedded per network (`ChainParams::genesis_coinbase`); its binding
 /// signature commits to exactly this value.
-pub const PREMINE: u64 = 1_050_000 * crate::amount::COIN;
+pub const PREMINE: u64 = 630_000 * crate::amount::COIN;
 
-/// Block subsidy at height 1, in smallest units. Provisional: 9.5 coins,
+/// Block subsidy at height 1, in smallest units. Provisional: 9.7 coins,
 /// so that the emission plus the premine sums to `MAX_MONEY`.
-pub const INITIAL_SUBSIDY: u64 = 95 * crate::amount::COIN / 10;
+pub const INITIAL_SUBSIDY: u64 = 97 * crate::amount::COIN / 10;
 
 /// Blocks between subsidy halvings. Provisional: about four years at
 /// two-minute blocks.
@@ -200,9 +200,9 @@ mod tests {
             "emission plus premine should approach the cap"
         );
         assert_eq!(
-            u128::from(PREMINE) * 20,
-            u128::from(crate::amount::MAX_MONEY),
-            "the premine is five percent"
+            u128::from(PREMINE) * 100,
+            u128::from(crate::amount::MAX_MONEY) * 3,
+            "the premine is three percent"
         );
     }
 

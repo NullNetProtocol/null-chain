@@ -894,6 +894,19 @@ Custody of the fund is a key-management question the code does not
 solve: there is no multisig, so split the fund across several notes to
 separately held keys at generation time or soon after.
 
+## 2026-10-15: Premine reduced to three percent
+
+The five percent development fund is cut to three percent of `MAX_MONEY`
+(630,000 coins), and the initial subsidy raised from 9.5 to 9.7 coins so
+emission plus premine still sums to the cap with the halving interval
+unchanged. Alternatives: keep five percent, or drop the premine
+entirely. A smaller premine weakens the "insider allocation" objection
+that matters for a privacy coin whose fund cannot be audited after
+genesis, while three percent still covers audits and early development.
+Both genesis coinbases were regenerated, the mainnet one now paying the
+real development fund address instead of the discarded placeholder,
+which changes both genesis hashes and resets any running test network.
+
 
 ## 2026-09-21: Embedded native desktop scaffold
 

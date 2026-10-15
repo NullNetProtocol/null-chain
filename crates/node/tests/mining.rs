@@ -115,8 +115,8 @@ async fn a_pool_mines_through_templates_and_submissions() {
     assert_eq!(info["syncing"], false);
     assert_eq!(info["next_height"], 1);
     assert_eq!(
-        info["subsidy"], "950000000",
-        "9.5 coins after the premine carve-out"
+        info["subsidy"], "970000000",
+        "9.7 coins after the premine carve-out"
     );
     assert_eq!(info["equihash"]["n"], 48);
     assert_eq!(info["next_target"].as_str().unwrap().len(), 8);
@@ -125,7 +125,7 @@ async fn a_pool_mines_through_templates_and_submissions() {
     let template = call(addr, t, "getblocktemplate", json!([payout])).await;
     assert_eq!(template["height"], 1);
     assert_eq!(template["transaction_count"], 1);
-    assert_eq!(template["coinbase_value"], "950000000");
+    assert_eq!(template["coinbase_value"], "970000000");
     assert_eq!(template["prev_hash"], info["best_block_hash"]);
     let again = call(
         addr,

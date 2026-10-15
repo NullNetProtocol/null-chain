@@ -157,7 +157,8 @@ Tick an item only when it has tests and passes clippy.
   - [x] RC-07: `consensus::next_height` refuses height `u32::MAX` instead of saturating
 - [ ] External audit of `crates/circuit` and `crates/crypto`
 - [x] Premine as a development fund: 5% of `MAX_MONEY` paid by a coinbase embedded in genesis, subsidy lowered to 9.5 so the cap holds; `nulld genesis-coinbase` regenerates it (2026-09-18)
-- [ ] Before launch: regenerate the mainnet genesis coinbase with the real development fund address (the committed one pays a discarded key) and re-pin the genesis hash
+- [x] Premine reduced to 3% (630,000 coins), subsidy raised to 9.7 so the cap holds; both genesis coinbases regenerated and the mainnet genesis hash re-pinned (2026-10-15)
+- [x] Regenerate the mainnet genesis coinbase with the real development fund address and re-pin the genesis hash (2026-10-15)
 - [ ] Exchange and mining pool integration (`docs/rpc.md` is the plan)
   - [x] Phase 0: JSON-RPC 2.0 over HTTP on `--rpc-http`, bearer token, same dispatcher as the line protocol; txid to (height, index) table in the store with a layout version; HTTP integration test harness (`crates/node/tests/rpc.rs`)
   - [x] Phase 1: node methods (chain info, blocks at three verbosities, transactions by id and status, submission, mempool, nullifier status, compact blocks, peers, network, uptime, stop, help)

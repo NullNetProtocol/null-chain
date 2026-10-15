@@ -93,8 +93,8 @@ The note commitment tree has depth 48, leaves are `cm`, nodes are
 ## 4. Amounts and fees
 
 One coin is `10^8` units; `MAX_MONEY` is `21,000,000` coins. The
-genesis coinbase pays a premine of `1,050,000` coins (5%) to the
-development fund; the block subsidy is 9.5 coins at height 1, halving
+genesis coinbase pays a premine of `630,000` coins (3%) to the
+development fund; the block subsidy is 9.7 coins at height 1, halving
 every 1,050,000 blocks, so emission plus premine sums to the cap. The
 premine is the only value the genesis block creates, and `subsidy(0)`
 is zero. A transaction's fee is `10,000` units per action. There is no
