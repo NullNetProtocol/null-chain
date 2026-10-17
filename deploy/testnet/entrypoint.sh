@@ -7,7 +7,7 @@ export NULL_WALLET_PASSPHRASE=testnet
 WALLET=/home/null/wallet.redb
 RPC="${RPC:-0.0.0.0:18444}"
 
-address_of() { nulld address --sk "$1"; }
+address_of() { nulld address --sk "$1" --network test; }
 
 case "$ROLE" in
   miner)

@@ -26,7 +26,7 @@ The backend integration tests run without a display.
 
 Defaults:
 
-- Network: `test` for a new installation; saved in `null.conf`.
+- Network: `main` for a new installation (pass `--network test` on the first run, or edit `null.conf`, for the test network); saved in `null.conf`.
 - Application data directory: Linux `$XDG_DATA_HOME/null`, falling back to
   `~/.local/share/null`; macOS `~/Library/Application Support/Null`;
   Windows `%LOCALAPPDATA%\Null`, falling back to `%APPDATA%\Null`.

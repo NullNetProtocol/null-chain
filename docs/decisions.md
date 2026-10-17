@@ -1145,3 +1145,15 @@ Three changes:
 - A connection the peer closes is logged with its direction, target and
   duration, and disconnects we initiate name the peer too.
 
+
+## 2026-10-17: Mainnet is the default network
+
+Every binary (`nulld` commands, `null-wallet-rpc`, and a new desktop
+configuration) now defaults to the main network; the test network is
+opt-in with `--network test`. Alternatives: keep test as the default
+until a later launch milestone, or require `--network` everywhere.
+Releases are public and mainnet has seed nodes, so a user who downloads
+a release and starts it should land on the real network; a default of
+test made the same binary behave differently depending on whether a
+`null.conf` from an earlier run existed. Developer scripts and the
+docker testnet already pass `--network test` explicitly.

@@ -115,7 +115,7 @@ pub enum Command {
     /// Run a node.
     Run {
         /// Network: `test` or `main`.
-        #[arg(long, default_value = "test")]
+        #[arg(long, default_value = "main")]
         network: Network,
         /// Data directory holding `chain.redb` and `rpc.token`; defaults to
         /// `<user data>/<network>/chain`, the same chain the desktop app uses.
@@ -174,7 +174,7 @@ pub enum Command {
     /// address, without a file.
     Keygen {
         /// Network to write the address for.
-        #[arg(long, default_value = "test")]
+        #[arg(long, default_value = "main")]
         network: Network,
     },
     /// Print a node's status line.
@@ -205,7 +205,7 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["sk", "phrase"])]
         viewing_key: Option<String>,
         /// Network the wallet is for.
-        #[arg(long, default_value = "test")]
+        #[arg(long, default_value = "main")]
         network: Network,
     },
     /// Build the genesis coinbase paying the premine to an address and
@@ -214,7 +214,7 @@ pub enum Command {
     /// new genesis hash.
     GenesisCoinbase {
         /// Network the coinbase is for.
-        #[arg(long, default_value = "test")]
+        #[arg(long, default_value = "main")]
         network: Network,
         /// The development fund address.
         #[arg(long)]
@@ -230,7 +230,7 @@ pub enum Command {
         #[command(flatten)]
         wallet: WalletArgs,
         /// Network, for a wallet file.
-        #[arg(long, default_value = "test")]
+        #[arg(long, default_value = "main")]
         network: Network,
     },
     /// Show the default address of a wallet.
@@ -239,7 +239,7 @@ pub enum Command {
         #[command(flatten)]
         wallet: WalletArgs,
         /// Network, for a wallet file.
-        #[arg(long, default_value = "test")]
+        #[arg(long, default_value = "main")]
         network: Network,
     },
     /// Scan the chain through a node and show the balance.
@@ -856,5 +856,39 @@ mod tests {
         let parsed = Cli::try_parse_from(["nulld", "run", "--in-memory", "--datadir", "x"]);
         assert!(parsed.is_err());
         assert!(Cli::try_parse_from(["nulld", "run", "--in-memory"]).is_ok());
+    }
+
+    /// The network a parsed command is for, if it takes one.
+    fn network_of_command(command: &Command) -> Option<Network> {
+        match command {
+            Command::Run { network, .. }
+            | Command::Keygen { network }
+            | Command::Create { network, .. }
+            | Command::GenesisCoinbase { network, .. }
+            | Command::ExportViewingKey { network, .. }
+            | Command::Address { network, .. } => Some(*network),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn every_command_defaults_to_the_main_network() {
+        for argv in [
+            &["nulld", "run"][..],
+            &["nulld", "keygen"],
+            &["nulld", "create", "--wallet", "w"],
+            &["nulld", "genesis-coinbase", "--address", "a", "--out", "o"],
+            &["nulld", "export-viewing-key", "--wallet", "w"],
+            &["nulld", "address", "--wallet", "w"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert_eq!(
+                network_of_command(&cli.command),
+                Some(Network::Main),
+                "{argv:?}"
+            );
+        }
+        let explicit = Cli::try_parse_from(["nulld", "keygen", "--network", "test"]).unwrap();
+        assert_eq!(network_of_command(&explicit.command), Some(Network::Test));
     }
 }

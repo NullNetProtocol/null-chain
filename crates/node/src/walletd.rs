@@ -92,7 +92,7 @@ pub struct Args {
     #[arg(long)]
     pub wallet: Option<PathBuf>,
     /// Network the wallet is for.
-    #[arg(long, default_value = "test")]
+    #[arg(long, default_value = "main")]
     pub network: Network,
     /// The node's control socket.
     #[arg(long, default_value = "127.0.0.1:18444")]
@@ -1204,6 +1204,12 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
 
     use super::*;
+
+    #[test]
+    fn the_wallet_daemon_defaults_to_the_main_network() {
+        let args = Args::try_parse_from(["null-wallet-rpc"]).unwrap();
+        assert_eq!(args.network, Network::Main);
+    }
 
     fn wallet_file() -> (tempfile::TempDir, Wallet) {
         let dir = tempfile::tempdir().unwrap();

@@ -22,7 +22,7 @@ use crate::backend;
     about = "NULL wallet with an embedded full node"
 )]
 pub struct Args {
-    /// Network override; a new configuration defaults to test.
+    /// Network override; a new configuration defaults to main.
     #[arg(long)]
     pub network: Option<Network>,
     /// Application data directory; defaults to the operating system's user data location.
@@ -147,7 +147,7 @@ struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            network: "test".into(),
+            network: "main".into(),
             rpc: SocketAddr::from(([127, 0, 0, 1], 18448)),
             connect: Vec::new(),
             listen: None,
@@ -354,7 +354,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn first_launch_creates_storage_and_settings_without_a_wallet_or_secrets() {
+    fn first_launch_creates_mainnet_storage_and_settings_without_a_wallet_or_secrets() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
         let args = Args {
@@ -362,12 +362,12 @@ mod tests {
             ..Args::default()
         };
         let startup = Startup::load(&args).unwrap();
-        assert!(data.join("test/chain").is_dir());
-        assert_eq!(startup.paths.wallet, data.join("test/wallet.redb"));
+        assert!(data.join("main/chain").is_dir());
+        assert_eq!(startup.paths.wallet, data.join("main/wallet.redb"));
         assert!(!startup.paths.wallet.exists());
         let (settings, fresh) = read_settings(&startup.paths.config).unwrap();
         assert!(!fresh);
-        assert_eq!(settings.network, "test");
+        assert_eq!(settings.network, "main");
         assert!(settings.rpc.ip().is_loopback());
         #[cfg(unix)]
         {
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn the_first_default_launch_remembers_a_legacy_wallet_without_copying_it() {
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join(".null-desktop/test/wallet.redb");
+        let old = dir.path().join(".null-desktop/main/wallet.redb");
         fs::create_dir_all(old.parent().unwrap()).unwrap();
         fs::write(&old, b"existing wallet").unwrap();
         let data = dir.path().join("new-data");
@@ -454,20 +454,20 @@ mod tests {
         .unwrap();
         assert_eq!(reopened.paths.wallet, old);
         assert_eq!(fs::read(old).unwrap(), b"existing wallet");
-        let main = Startup::prepare(
+        let other = Startup::prepare(
             &Args {
-                network: Some(Network::Main),
+                network: Some(Network::Test),
                 ..Args::default()
             },
             data.clone(),
             dir.path(),
         )
         .unwrap();
-        assert_eq!(main.paths.wallet, data.join("main/wallet.redb"));
+        assert_eq!(other.paths.wallet, data.join("test/wallet.redb"));
         // Recreating a missing config must prefer a wallet already at the new
         // default location over any old scaffold wallet left behind.
         let preferred_data = dir.path().join("preferred-data");
-        let preferred = preferred_data.join("test/wallet.redb");
+        let preferred = preferred_data.join("main/wallet.redb");
         fs::create_dir_all(preferred.parent().unwrap()).unwrap();
         fs::write(&preferred, b"current wallet").unwrap();
         let startup = Startup::prepare(&Args::default(), preferred_data, dir.path()).unwrap();
