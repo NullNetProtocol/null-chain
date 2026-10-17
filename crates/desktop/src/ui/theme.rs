@@ -92,10 +92,13 @@ pub const CONTENT_WIDTH: f32 = 760.0;
 pub const QR_SIZE: f32 = 200.0;
 /// Width of forms that ask for one thing, such as unlocking.
 pub const NARROW_WIDTH: f32 = 460.0;
-/// Width of one word's input in a recovery phrase grid.
-pub const WORD_INPUT_WIDTH: f32 = 110.0;
 /// Words per row in recovery phrase grids, shown and typed alike.
-pub const WORDS_PER_ROW: usize = 4;
+pub const WORDS_PER_ROW: u8 = 4;
+/// Width reserved for a word's position number inside its cell, so every
+/// word starts at the same x whatever its number's digits.
+pub const WORD_NUMBER_WIDTH: f32 = 22.0;
+/// Horizontal padding inside a recovery word cell.
+pub const WORD_CELL_PADDING: i8 = 8;
 /// Width of the navigation sidebar.
 pub const SIDEBAR_WIDTH: f32 = 200.0;
 /// Minimum height of buttons and inputs, a comfortable click target.

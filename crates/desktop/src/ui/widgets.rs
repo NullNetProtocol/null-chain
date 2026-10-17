@@ -316,33 +316,109 @@ fn control_size() -> egui::Vec2 {
 /// A text input for a secret that keeps no undo history of it. `masked`
 /// hides the text; unmasked suits single recovery words being checked.
 pub fn secret_input(ui: &mut Ui, value: &mut Zeroizing<String>, id: &str, masked: bool) {
-    secret_edit(ui, value, id, masked, f32::INFINITY);
+    show_without_undo(
+        ui,
+        egui::TextEdit::singleline(&mut **value)
+            .id_salt(id)
+            .password(masked)
+            .desired_width(f32::INFINITY)
+            .margin(egui::vec2(theme::SPACE_SM, theme::SPACE_SM)),
+    );
 }
 
-/// A narrow, unmasked input for one recovery word in a grid.
-pub fn word_input(ui: &mut Ui, value: &mut Zeroizing<String>, id: &str) {
-    secret_edit(ui, value, id, false, theme::WORD_INPUT_WIDTH);
-}
-
-fn secret_edit(ui: &mut Ui, value: &mut Zeroizing<String>, id: &str, masked: bool, width: f32) {
-    let mut output = egui::TextEdit::singleline(&mut **value)
-        .id_salt(id)
-        .password(masked)
-        .desired_width(width)
-        .margin(egui::vec2(theme::SPACE_SM, theme::SPACE_SM))
-        .show(ui);
-    // Do not retain passphrases or seeds in the widget's undo history.
+/// Shows a text edit holding a secret and drops its undo history, so the
+/// widget keeps no copies of earlier contents.
+fn show_without_undo(ui: &mut Ui, edit: egui::TextEdit<'_>) -> Response {
+    let mut output = edit.show(ui);
     output.state.clear_undoer();
     output.state.store(ui.ctx(), output.response.id);
+    output.response
 }
 
-/// The small position number before a recovery word, counting from one.
-pub fn word_number(ui: &mut Ui, index: usize) {
-    ui.label(
-        RichText::new(index.saturating_add(1).to_string())
-            .size(theme::SMALL_SIZE)
-            .color(theme::TEXT_MUTED),
-    );
+/// Lays out `count` recovery word cells in rows of
+/// [`theme::WORDS_PER_ROW`], all the same width, filling the available
+/// width; `cell` draws the word at each index.
+pub fn word_grid(ui: &mut Ui, count: usize, mut cell: impl FnMut(&mut Ui, usize)) {
+    let columns = usize::from(theme::WORDS_PER_ROW);
+    let gap = theme::SPACE_SM;
+    let spans = f32::from(theme::WORDS_PER_ROW);
+    let width = ((ui.available_width() - gap * (spans - 1.0)) / spans).floor();
+    for start in (0..count).step_by(columns) {
+        // Every cell gets an exact rectangle, so columns line up to the pixel.
+        let (row, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), theme::CONTROL_HEIGHT),
+            egui::Sense::hover(),
+        );
+        let mut left = row.min.x;
+        for index in start..count.min(start.saturating_add(columns)) {
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(left, row.min.y),
+                egui::vec2(width, theme::CONTROL_HEIGHT),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(Layout::left_to_right(Align::Center)),
+                |ui| cell(ui, index),
+            );
+            left += width + gap;
+        }
+    }
+}
+
+/// One recovery word cell: a rounded box with the word's position number
+/// in a fixed-width slot and `content` after it. Returns `content`'s
+/// response, and outlines the cell with the accent while it has focus.
+fn word_cell(ui: &mut Ui, index: usize, content: impl FnOnce(&mut Ui) -> Response) -> Response {
+    let frame = Frame::new()
+        .fill(theme::SURFACE_RAISED)
+        .stroke(Stroke::new(theme::LINE_WIDTH, theme::BORDER))
+        .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+        .inner_margin(Margin::symmetric(theme::WORD_CELL_PADDING, 0));
+    let shown = frame.show(ui, |ui| {
+        ui.set_min_size(egui::vec2(ui.available_width(), theme::CONTROL_HEIGHT));
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            ui.add_sized(
+                egui::vec2(theme::WORD_NUMBER_WIDTH, theme::CONTROL_HEIGHT),
+                egui::Label::new(
+                    RichText::new(index.saturating_add(1).to_string())
+                        .size(theme::SMALL_SIZE)
+                        .color(theme::TEXT_MUTED),
+                ),
+            );
+            content(ui)
+        })
+        .inner
+    });
+    if shown.inner.has_focus() {
+        ui.painter().rect_stroke(
+            shown.response.rect,
+            CornerRadius::same(theme::RADIUS_SM),
+            Stroke::new(theme::LINE_WIDTH, theme::ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    shown.inner
+}
+
+/// A recovery word cell holding an unmasked input for that word.
+pub fn word_input(ui: &mut Ui, index: usize, value: &mut Zeroizing<String>) {
+    word_cell(ui, index, |ui| {
+        show_without_undo(
+            ui,
+            egui::TextEdit::singleline(&mut **value)
+                .id_salt(("recovery-word", index))
+                .frame(false)
+                .desired_width(ui.available_width()),
+        )
+    });
+}
+
+/// A recovery word cell showing the word, for writing it down.
+pub fn word_display(ui: &mut Ui, index: usize, word: &str) {
+    word_cell(ui, index, |ui| {
+        ui.label(RichText::new(word).monospace().size(theme::BODY_SIZE))
+    });
 }
 
 /// Light modules scanners need around a QR code, per side.
@@ -412,6 +488,45 @@ mod tests {
     #[test]
     fn qr_codes_differ_for_different_text() {
         assert_ne!(qr_modules("tnull1a"), qr_modules("tnull1b"));
+    }
+
+    #[test]
+    // Alignment means pixel-identical edges, so exact comparison is the point.
+    #[allow(clippy::float_cmp)]
+    fn word_cells_share_one_width_and_line_up_in_rows_and_columns() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let width = 600.0;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut cells = Vec::new();
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                word_grid(ui, 24, |ui, _| cells.push(ui.max_rect()));
+            });
+        });
+        let columns = usize::from(theme::WORDS_PER_ROW);
+        assert_eq!(cells.len(), 24);
+        for (index, cell) in cells.iter().enumerate() {
+            assert_eq!(cell.width(), cells[0].width(), "cell {index}");
+            assert_eq!(cell.left(), cells[index % columns].left(), "cell {index}");
+            assert_eq!(
+                cell.top(),
+                cells[index - index % columns].top(),
+                "cell {index}"
+            );
+            assert!(cell.right() <= width, "cell {index}: {cell:?}");
+        }
+        for row in cells.chunks(columns) {
+            for pair in row.windows(2) {
+                assert!(pair[0].right() < pair[1].left(), "{pair:?}");
+            }
+        }
     }
 
     #[test]

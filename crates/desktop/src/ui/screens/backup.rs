@@ -1,13 +1,13 @@
 //! The one-time recovery phrase backup, and a check that it was written
 //! down before the phrase is forgotten.
 
-use eframe::egui::{self, RichText, Ui};
+use eframe::egui::Ui;
 use rand::seq::index::sample;
 use rand::Rng;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroizing;
 
-use crate::ui::theme::{self, Tone};
+use crate::ui::theme::Tone;
 use crate::ui::widgets;
 
 /// Words the user must type back from their written copy.
@@ -122,20 +122,10 @@ impl Backup {
 }
 
 fn word_grid(ui: &mut Ui, phrase: &str) {
-    egui::Grid::new("recovery-phrase")
-        .num_columns(theme::WORDS_PER_ROW)
-        .spacing(egui::vec2(theme::SPACE_LG, theme::SPACE_MD))
-        .show(ui, |ui| {
-            for (index, word) in phrase.split_whitespace().enumerate() {
-                ui.horizontal(|ui| {
-                    widgets::word_number(ui, index);
-                    ui.label(RichText::new(word).monospace().size(theme::TITLE_SIZE));
-                });
-                if index.saturating_add(1) % theme::WORDS_PER_ROW == 0 {
-                    ui.end_row();
-                }
-            }
-        });
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    widgets::word_grid(ui, words.len(), |ui, index| {
+        widgets::word_display(ui, index, words.get(index).copied().unwrap_or_default());
+    });
 }
 
 #[cfg(test)]

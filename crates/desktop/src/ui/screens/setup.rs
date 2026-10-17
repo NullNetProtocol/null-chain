@@ -1,6 +1,6 @@
 //! First run, import, unlock, and the one-time recovery phrase backup.
 
-use eframe::egui::{self, Ui};
+use eframe::egui::Ui;
 use null_desktop::backend::{Action, OpenMode};
 use null_wallet::seed::WORD_COUNT;
 use zeroize::{Zeroize, Zeroizing};
@@ -190,22 +190,13 @@ fn blank_words() -> Vec<Zeroizing<String>> {
     (0..WORD_COUNT).map(|_| Zeroizing::default()).collect()
 }
 
-/// Draws the numbered word inputs, [`theme::WORDS_PER_ROW`] to a row.
+/// Draws one numbered input per recovery word.
 fn word_inputs(ui: &mut Ui, words: &mut [Zeroizing<String>]) {
-    egui::Grid::new("restore-words")
-        .num_columns(theme::WORDS_PER_ROW)
-        .spacing(egui::vec2(theme::SPACE_MD, theme::SPACE_SM))
-        .show(ui, |ui| {
-            for (index, word) in words.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    widgets::word_number(ui, index);
-                    widgets::word_input(ui, word, &format!("restore-{index}"));
-                });
-                if index.saturating_add(1) % theme::WORDS_PER_ROW == 0 {
-                    ui.end_row();
-                }
-            }
-        });
+    widgets::word_grid(ui, words.len(), |ui, index| {
+        if let Some(word) = words.get_mut(index) {
+            widgets::word_input(ui, index, word);
+        }
+    });
 }
 
 /// Moves the words of an input holding several (a pasted phrase) into it
