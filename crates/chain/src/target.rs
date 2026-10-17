@@ -13,7 +13,9 @@ use crate::Error;
 use null_protocol::block::BlockHash;
 
 mod u256 {
-    #![allow(missing_docs, clippy::all, clippy::pedantic)] // generated arithmetic
+    // Generated arithmetic; newer compilers deprecate the `max_value` the
+    // macro expands to.
+    #![allow(missing_docs, deprecated, clippy::all, clippy::pedantic)]
     uint::construct_uint! {
         /// A 256-bit unsigned integer.
         pub struct U256(4);
