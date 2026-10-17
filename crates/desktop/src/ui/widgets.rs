@@ -316,15 +316,33 @@ fn control_size() -> egui::Vec2 {
 /// A text input for a secret that keeps no undo history of it. `masked`
 /// hides the text; unmasked suits single recovery words being checked.
 pub fn secret_input(ui: &mut Ui, value: &mut Zeroizing<String>, id: &str, masked: bool) {
+    secret_edit(ui, value, id, masked, f32::INFINITY);
+}
+
+/// A narrow, unmasked input for one recovery word in a grid.
+pub fn word_input(ui: &mut Ui, value: &mut Zeroizing<String>, id: &str) {
+    secret_edit(ui, value, id, false, theme::WORD_INPUT_WIDTH);
+}
+
+fn secret_edit(ui: &mut Ui, value: &mut Zeroizing<String>, id: &str, masked: bool, width: f32) {
     let mut output = egui::TextEdit::singleline(&mut **value)
         .id_salt(id)
         .password(masked)
-        .desired_width(f32::INFINITY)
+        .desired_width(width)
         .margin(egui::vec2(theme::SPACE_SM, theme::SPACE_SM))
         .show(ui);
     // Do not retain passphrases or seeds in the widget's undo history.
     output.state.clear_undoer();
     output.state.store(ui.ctx(), output.response.id);
+}
+
+/// The small position number before a recovery word, counting from one.
+pub fn word_number(ui: &mut Ui, index: usize) {
+    ui.label(
+        RichText::new(index.saturating_add(1).to_string())
+            .size(theme::SMALL_SIZE)
+            .color(theme::TEXT_MUTED),
+    );
 }
 
 /// Light modules scanners need around a QR code, per side.

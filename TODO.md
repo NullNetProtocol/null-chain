@@ -187,6 +187,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] NULL brand: website palette (black and terminal green), vector logo and nav icons, window icon, Linux desktop entry (2026-09-28)
 - [x] Desktop mining: switch and thread slider on the Node page, main (index 0) address payout, needs an unlocked wallet, stops on lock, saved in `null.conf`; runtime start/stop in `null_node::miner` (2026-09-28)
 - [x] Mining stops within one solve and never blocks the GUI; Linux app installs its own desktop entry so Wayland taskbars show the brand icon (2026-09-28)
+- [x] Desktop pinned to the dark theme (a light-mode OS swapped in egui's light text), recovery phrase import as 24 numbered word inputs with paste spreading, icon embedded in the Windows executable; release 0.1.1 (2026-10-17)
 - [x] Miners drop a template once the best tip moves (node tip watch); a mining wallet is exempt from idle auto-lock (2026-09-28)
 - [x] Release archives: `make dist` (Linux glibc 2.28 and Windows via Zig) and a tag-triggered release workflow for Linux, Windows, and macOS (arm64 and x86_64) (2026-09-28)
 - [ ] Installers and signing: macOS .app bundle and notarization, Windows installer with the exe icon and Authenticode signing, Linux AppImage

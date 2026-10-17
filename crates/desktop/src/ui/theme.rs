@@ -4,7 +4,8 @@
 //! the look of the whole application changes here and nowhere else.
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle,
+    self, Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle, Theme,
+    ThemePreference,
 };
 
 // Palette: the NULL website's dark theme (near-black neutrals with one
@@ -91,6 +92,10 @@ pub const CONTENT_WIDTH: f32 = 760.0;
 pub const QR_SIZE: f32 = 200.0;
 /// Width of forms that ask for one thing, such as unlocking.
 pub const NARROW_WIDTH: f32 = 460.0;
+/// Width of one word's input in a recovery phrase grid.
+pub const WORD_INPUT_WIDTH: f32 = 110.0;
+/// Words per row in recovery phrase grids, shown and typed alike.
+pub const WORDS_PER_ROW: usize = 4;
 /// Width of the navigation sidebar.
 pub const SIDEBAR_WIDTH: f32 = 200.0;
 /// Minimum height of buttons and inputs, a comfortable click target.
@@ -148,8 +153,13 @@ pub fn display_font() -> FontId {
 }
 
 /// Installs the theme on a context. Call once at startup.
+///
+/// The palette is dark only, so the theme is pinned to dark: following the
+/// system would switch to egui's light style on a light-mode desktop, and
+/// its dark text would land on these dark panels.
 pub fn apply(ctx: &egui::Context) {
-    ctx.set_visuals(visuals());
+    ctx.set_theme(ThemePreference::Dark);
+    ctx.set_visuals_of(Theme::Dark, visuals());
     ctx.all_styles_mut(|style| {
         style.text_styles = [
             (TextStyle::Heading, FontId::proportional(HEADING_SIZE)),
@@ -243,6 +253,22 @@ mod tests {
                 assert!(ratio >= AA, "{text:?} on {background:?}: {ratio}");
             }
         }
+    }
+
+    #[test]
+    fn a_light_mode_system_still_gets_the_dark_palette() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let light_system = egui::RawInput {
+            system_theme: Some(Theme::Light),
+            ..Default::default()
+        };
+        let _ = ctx.run(light_system, |_| {});
+        assert_eq!(ctx.theme(), Theme::Dark);
+        let style = ctx.style();
+        assert_eq!(style.visuals.override_text_color, Some(TEXT));
+        assert_eq!(style.visuals.extreme_bg_color, SURFACE_RAISED);
+        assert_eq!(style.visuals.selection.bg_fill, SELECTION);
     }
 
     #[test]

@@ -13,9 +13,6 @@ use crate::ui::widgets;
 /// Words the user must type back from their written copy.
 const CHECKED_WORDS: usize = 3;
 
-/// Words per row in the recovery phrase grid.
-const WORDS_PER_ROW: usize = 4;
-
 /// Backup progress for one newly generated phrase.
 pub struct Backup {
     /// Zero-based positions to check, in ascending order.
@@ -126,19 +123,15 @@ impl Backup {
 
 fn word_grid(ui: &mut Ui, phrase: &str) {
     egui::Grid::new("recovery-phrase")
-        .num_columns(WORDS_PER_ROW)
+        .num_columns(theme::WORDS_PER_ROW)
         .spacing(egui::vec2(theme::SPACE_LG, theme::SPACE_MD))
         .show(ui, |ui| {
             for (index, word) in phrase.split_whitespace().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(index.saturating_add(1).to_string())
-                            .size(theme::SMALL_SIZE)
-                            .color(theme::TEXT_MUTED),
-                    );
+                    widgets::word_number(ui, index);
                     ui.label(RichText::new(word).monospace().size(theme::TITLE_SIZE));
                 });
-                if index.saturating_add(1) % WORDS_PER_ROW == 0 {
+                if index.saturating_add(1) % theme::WORDS_PER_ROW == 0 {
                     ui.end_row();
                 }
             }
