@@ -1633,7 +1633,7 @@ mod tests {
         let submitted = daemon.wallet().operation(op.id).unwrap();
         let txid = submitted.status.txid().unwrap();
         assert_eq!(submitted.attempts, 2);
-        assert!(!submitted.locked.is_empty());
+        assert_ne!(submitted.locked.len(), 0);
         let mut client = source.connect().await.unwrap();
         assert_eq!(
             transaction_status(&mut client, txid).await.unwrap(),

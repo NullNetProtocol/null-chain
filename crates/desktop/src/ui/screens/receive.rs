@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(call.method, "getnewaddress");
         assert_eq!(call.params, json!(["rent"]));
         assert!(matches!(call.reply, Reply::Notice(_)));
-        assert!(form.label.is_empty());
+        assert_eq!(form.label.len(), 0);
         assert_eq!(form.shown, None, "the new address will be featured");
     }
 

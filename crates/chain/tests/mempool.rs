@@ -253,7 +253,7 @@ fn a_reorganization_below_an_activation_empties_the_pool_too() {
     h.chain.store().revert().unwrap();
     assert_eq!(h.chain.tip().unwrap().height, 1);
     let params = *h.chain.params();
-    assert!(pool.select(h.chain.store(), &params, 8).unwrap().is_empty());
+    assert_eq!(pool.select(h.chain.store(), &params, 8).unwrap().len(), 0);
     assert!(pool.is_empty());
 
     let signed_old = spend_first_note_for(&mut h, &at_tip_1, &other.address, 1_000, old);

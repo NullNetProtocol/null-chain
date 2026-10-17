@@ -192,6 +192,6 @@ mod tests {
 
     #[test]
     fn the_test_network_has_no_public_seeds() {
-        assert!(Network::Test.seeds().is_empty());
+        assert_eq!(Network::Test.seeds().len(), 0);
     }
 }

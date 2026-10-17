@@ -307,7 +307,7 @@ mod tests {
             Rejection::SpentNullifier,
             Rejection::Conflict,
         ] {
-            assert!(!r.to_string().is_empty());
+            assert_ne!(r.to_string().len(), 0);
         }
         let empty = Mempool::new(4);
         assert!(empty.is_empty());

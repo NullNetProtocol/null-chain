@@ -627,7 +627,7 @@ mod tests {
         let input = b"block header bytes";
         let nonce = [7u8; 32];
         let solutions = zcash.solve(input, &nonce);
-        assert!(!solutions.is_empty());
+        assert_ne!(solutions.len(), 0);
         for solution in &solutions {
             assert_eq!(zcash.verify(input, &nonce, solution), Ok(()));
             assert!(equihash::is_valid_solution(96, 5, input, &nonce, solution).is_ok());

@@ -107,7 +107,7 @@ mod tests {
             let (block, tree) = genesis_with_tree(&params);
             assert_eq!(block.header().commitment_root, tree.root());
             let Some(bytes) = params.genesis_coinbase else {
-                assert!(block.transactions().is_empty());
+                assert_eq!(block.transactions().len(), 0);
                 continue;
             };
             let tx = Transaction::from_slice(bytes).expect("embedded coinbase parses");

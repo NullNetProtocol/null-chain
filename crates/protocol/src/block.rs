@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(block.check_tx_root(), Ok(()));
         assert_eq!(Block::from_slice(&block.to_vec()), Ok(block.clone()));
         assert_eq!(block.hash(), block.header().hash());
-        assert!(block.transactions().is_empty());
+        assert_eq!(block.transactions().len(), 0);
     }
 
     #[test]

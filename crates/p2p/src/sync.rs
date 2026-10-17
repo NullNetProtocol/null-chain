@@ -364,8 +364,8 @@ mod tests {
         let first = sync.next_requests(0);
         assert_eq!(first.len(), MAX_IN_FLIGHT);
         assert_eq!(sync.queued(), 39 - MAX_IN_FLIGHT);
-        assert!(sync.next_requests(1).is_empty());
-        assert!(sync.timeouts(REQUEST_TIMEOUT - 1).is_empty());
+        assert_eq!(sync.next_requests(1).len(), 0);
+        assert_eq!(sync.timeouts(REQUEST_TIMEOUT - 1).len(), 0);
         let expired = sync.timeouts(REQUEST_TIMEOUT);
         assert_eq!(expired.len(), MAX_IN_FLIGHT);
         assert_eq!(sync.in_flight(), 0);

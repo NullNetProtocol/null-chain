@@ -1323,7 +1323,7 @@ mod tests {
         assert_eq!(wallet.locked_positions().unwrap(), vec![4, 9]);
         op.status = crate::operations::OperationStatus::Cancelled;
         wallet.put_operation(&op).unwrap();
-        assert!(wallet.locked_positions().unwrap().is_empty());
+        assert_eq!(wallet.locked_positions().unwrap().len(), 0);
         assert!(matches!(wallet.operation(7), Err(Error::NoOperation(7))));
     }
 

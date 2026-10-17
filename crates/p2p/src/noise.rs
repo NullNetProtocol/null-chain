@@ -246,7 +246,7 @@ mod tests {
     fn partial_chunks_wait_and_tampering_fails() {
         let ((mut aw, _), (_, mut br)) = pair().unwrap();
         let wire = aw.seal(b"payload").unwrap();
-        assert!(br.open(&wire[..5]).unwrap().is_empty());
+        assert_eq!(br.open(&wire[..5]).unwrap().len(), 0);
         assert_eq!(br.open(&wire[5..]).unwrap(), b"payload");
 
         let mut forged = aw.seal(b"more").unwrap();

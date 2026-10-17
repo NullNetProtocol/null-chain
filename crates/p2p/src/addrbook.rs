@@ -207,7 +207,7 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(2);
         assert!(book.is_banned(&addr(1, 0).ip, 100));
         assert!(book.candidate(&[], 100, &mut rng).is_none());
-        assert!(book.sample(5, 100, &mut rng).is_empty());
+        assert_eq!(book.sample(5, 100, &mut rng).len(), 0);
         assert!(book.candidate(&[], 100 + BAN_SECONDS, &mut rng).is_some());
         book.prune(100 + BAN_SECONDS);
         assert!(!book.is_banned(&addr(1, 0).ip, 100 + BAN_SECONDS));

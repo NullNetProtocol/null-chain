@@ -175,7 +175,7 @@ mod tests {
         let route = d.route_own(txid(1), 0, &mut rng);
         assert!(matches!(route, Route::Stem(10 | 11)));
         assert_eq!(d.embargoed(), 1);
-        assert!(d.expired_embargoes(EMBARGO_MIN - 1).is_empty());
+        assert_eq!(d.expired_embargoes(EMBARGO_MIN - 1).len(), 0);
         assert_eq!(
             d.expired_embargoes(EMBARGO_MIN + EMBARGO_JITTER),
             vec![txid(1)]
@@ -209,7 +209,7 @@ mod tests {
         d.new_epoch(0, &[1], &[10], &mut rng);
         d.route_own(txid(1), 0, &mut rng);
         d.seen_fluffed(&txid(1));
-        assert!(d.expired_embargoes(1_000).is_empty());
+        assert_eq!(d.expired_embargoes(1_000).len(), 0);
         d.remove_peer(&10);
         assert_eq!(d.route_own(txid(2), 0, &mut rng), Route::Fluff);
         assert_eq!(d.route_stem(1, txid(3), 0, &mut rng), Route::Fluff);

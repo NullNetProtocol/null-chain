@@ -392,10 +392,8 @@ mod tests {
     #[test]
     fn transaction_history_survives_reopening_and_can_select_an_older_attempt() {
         let mut op = sample(OperationStatus::Building);
-        assert!(Operation::from_slice(&op.to_vec())
-            .unwrap()
-            .previous_transactions
-            .is_empty());
+        let reopened = Operation::from_slice(&op.to_vec()).unwrap();
+        assert_eq!(reopened.previous_transactions.len(), 0);
         let original = op.transaction.clone().unwrap();
         op.record_transaction(vec![4, 5]);
         op.record_transaction(vec![6, 7]);

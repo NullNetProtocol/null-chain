@@ -246,7 +246,7 @@ mod tests {
     fn handshake() -> (Peer, Peer) {
         let (mut out, events) = Peer::new(Direction::Outbound, info(1), 0);
         let (mut inb, none) = Peer::new(Direction::Inbound, info(2), 0);
-        assert!(none.is_empty());
+        assert_eq!(none.len(), 0);
         let Event::Send(version) = &events[0] else {
             panic!("outbound sends version")
         };
@@ -323,12 +323,12 @@ mod tests {
             out.handle(&Message::Ping(9), 10),
             vec![Event::Send(Message::Pong(9))]
         );
-        assert!(out.tick(10, 1).is_empty());
+        assert_eq!(out.tick(10, 1).len(), 0);
         assert_eq!(
             out.tick(10 + PING_INTERVAL, 42),
             vec![Event::Send(Message::Ping(42))]
         );
-        assert!(out.tick(10 + PING_INTERVAL + 1, 43).is_empty());
+        assert_eq!(out.tick(10 + PING_INTERVAL + 1, 43).len(), 0);
         assert_eq!(
             out.tick(10 + PING_INTERVAL + PING_TIMEOUT, 44),
             vec![Event::Disconnect {
