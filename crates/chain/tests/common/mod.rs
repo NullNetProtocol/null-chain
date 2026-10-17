@@ -233,7 +233,7 @@ impl Harness {
             timestamp: parent.timestamp + self.spacing,
             commitment_root: tree.root(),
             tx_root: null_protocol::block::tx_root(transactions.iter().map(Transaction::txid)),
-            target: next_target(&params, &samples).to_compact(),
+            target: next_target(&params, height, &samples).to_compact(),
             nonce: [0; 32],
             solution: PowSolution::empty(),
         };

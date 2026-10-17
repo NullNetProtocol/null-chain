@@ -190,6 +190,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Desktop pinned to the dark theme (a light-mode OS swapped in egui's light text), recovery phrase import as 24 numbered word inputs with paste spreading, icon embedded in the Windows executable; release 0.1.1 (2026-10-17)
 - [x] Recovery word grid rebuilt as equal-width cells at exact positions with the number inside each box, shared by import and backup; release 0.1.2 (2026-10-17)
 - [x] Mainnet is the default network for every binary and a new desktop configuration; test is opt-in with `--network test`; release 0.1.3 (2026-10-17)
+- [x] Mainnet PoW limit eased to `0x200fffff` from height 11 (about 16 solutions per block instead of 8,192), so the seeds reach the block interval; stores from 0.1.3 and earlier resync; release 0.1.4 (2026-10-17)
 - [x] Miners drop a template once the best tip moves (node tip watch); a mining wallet is exempt from idle auto-lock (2026-09-28)
 - [x] Release archives: `make dist` (Linux glibc 2.28 and Windows via Zig) and a tag-triggered release workflow for Linux, Windows, and macOS (arm64 and x86_64) (2026-09-28)
 - [ ] Installers and signing: macOS .app bundle and notarization, Windows installer with the exe icon and Authenticode signing, Linux AppImage

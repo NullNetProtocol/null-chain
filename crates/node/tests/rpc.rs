@@ -168,6 +168,8 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
     assert_eq!(info["genesis_hash"], genesis_hash);
     assert_eq!(info["fee_per_action"], "10000");
     assert_eq!(info["branch"], "0x54455354");
+    assert_eq!(info["pow_limit"], "207fffff");
+    assert!(info["pow_limit_change"].is_null());
     assert_eq!(info["proof_lengths"]["2"], 8736);
     assert_eq!(
         info["coinbase_maturity"],

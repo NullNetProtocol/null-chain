@@ -177,7 +177,7 @@ impl Validator<'_> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let expected = next_target(self.params, &samples);
+        let expected = next_target(self.params, header.height, &samples);
         if Target::from_compact(header.target)? == expected {
             Ok(())
         } else {

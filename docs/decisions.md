@@ -1157,3 +1157,35 @@ a release and starts it should land on the real network; a default of
 test made the same binary behave differently depending on whether a
 `null.conf` from an earlier run existed. Developer scripts and the
 docker testnet already pass `--network test` explicitly.
+
+## 2026-10-17: Ease the mainnet PoW limit from height 11
+
+Mainnet launched at `0x1f07ffff`, which one Equihash (144, 5) solution
+meets with probability 1/8,192. The difficulty rule can make blocks
+harder, never easier than the limit, so even with no competition a block
+needs about 4,096 solves. A solve takes 15 s on the development machine
+(`docs/perf.md`) and about 70 s on one core of the seed hosts, so the five
+seeds found a block every ~18 h on average instead of every 120 s: ten
+blocks in the first 31 h (luck), then none for 28 h. Traces of 560
+nonces showed the miner sound (about two verified solutions per nonce,
+header hashes uniform below the 2^256 / 8,192 bound), so the limit, not
+the code, was wrong: it would have needed about 500 cores at minimum
+difficulty.
+
+Chosen: from height 11, the first block after launch's ten, the limit is
+`0x200fffff`, about one solution in 16, which the five seed cores meet in
+about two minutes; the LWMA rule raises the target as hashrate arrives
+once its 60-block window fills. Blocks 0-10 keep the launch limit, so
+genesis, the premine and the mined rewards are unchanged
+(`ChainParams::pow_limit_change`, `pow_limit_at`). Alternatives: reset
+the chain with a new genesis (throws away a launched chain, its
+published genesis hash and rewards), a faster solver alone (even a 10x
+faster one leaves blocks hours apart), or a much easier limit such as
+the test network's (lets one desktop flood the first 60 blocks before
+the rule adapts).
+
+The change is part of the rules digest, so stores built by 0.1.3 and
+earlier are refused with the existing "delete the chain directory"
+message and resync the ten blocks from peers; the test network has no
+change and keeps its digest. Nodes that do not upgrade stay on the launch
+limit and fork off at height 11.

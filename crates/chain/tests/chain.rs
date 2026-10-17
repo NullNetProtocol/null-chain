@@ -348,7 +348,7 @@ fn block_over(
                 .iter()
                 .map(null_protocol::transaction::Transaction::txid),
         ),
-        target: next_target(&params, &samples).to_compact(),
+        target: next_target(&params, parent.height + 1, &samples).to_compact(),
         nonce: [0; 32],
         solution: PowSolution::empty(),
     };
@@ -573,6 +573,57 @@ fn a_mainnet_sized_difficulty_window_retargets_and_is_enforced() {
         ))
     ));
     assert!(h.chain.store().block(&easy_side.hash()).unwrap().is_none());
+}
+
+/// A block after `parent` declaring `target`, mined and otherwise
+/// identical to what the harness would build.
+fn at_target(h: &mut Harness, parent: &null_protocol::block::BlockHeader, target: Target) -> Block {
+    let parent_tree = h.chain.store().tree_at(parent.height).unwrap().unwrap();
+    let (block, _) = h.make_block_on(parent, &parent_tree, Vec::new());
+    let mut header = block.header().clone();
+    header.target = target.to_compact();
+    assert!(h.chain.pow().mine(&mut header, 256, &mut h.rng).unwrap());
+    Block::new(header, block.transactions().to_vec())
+}
+
+#[test]
+fn the_pow_limit_changes_at_its_height_and_both_sides_are_enforced() {
+    let base = ChainParams::test();
+    let new_limit = Target::from_compact(0x203f_ffff).unwrap();
+    let params = ChainParams {
+        pow_limit_change: Some(null_chain::params::PowLimitChange {
+            height: 3,
+            limit: new_limit,
+        }),
+        ..base
+    };
+    let mut h = Harness::with_params(15, params);
+    h.extend(Vec::new());
+    // Below the change the new limit is refused...
+    let tip = h.tip_header();
+    let early = at_target(&mut h, &tip, new_limit);
+    assert!(matches!(
+        h.import(&early),
+        Err(Error::InvalidHeader(
+            "target does not match the difficulty rule"
+        ))
+    ));
+    h.extend(Vec::new());
+    assert_eq!(h.tip_header().target, base.pow_limit.to_compact());
+    // ...and from it on the old one is.
+    let tip = h.tip_header();
+    let stale = at_target(&mut h, &tip, base.pow_limit);
+    assert!(matches!(
+        h.import(&stale),
+        Err(Error::InvalidHeader(
+            "target does not match the difficulty rule"
+        ))
+    ));
+    for _ in 0..3 {
+        h.extend(Vec::new());
+        assert_eq!(h.tip_header().target, new_limit.to_compact());
+    }
+    assert_eq!(h.tip_header().height, 5);
 }
 
 #[test]

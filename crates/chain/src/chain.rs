@@ -245,6 +245,12 @@ pub fn rules_digest(params: &ChainParams, vk: &VerifyingKey) -> [u8; 32] {
     w.put(&params.equihash.n().to_le_bytes());
     w.put(&params.equihash.k().to_le_bytes());
     w.put(&params.pow_limit.to_compact().to_le_bytes());
+    // Only written when set, so a network that never changed its limit
+    // keeps the digest its stores were stamped with.
+    if let Some(change) = params.pow_limit_change {
+        w.put(&change.height.to_le_bytes());
+        w.put(&change.limit.to_compact().to_le_bytes());
+    }
     w.put(&params.block_interval.to_le_bytes());
     w.put(
         &u64::try_from(params.difficulty_window)
@@ -327,6 +333,25 @@ mod tests {
             ..base
         };
         assert_ne!(rules_digest(&base, &vk), rules_digest(&other_branch, &vk));
+        let eased = ChainParams {
+            pow_limit_change: Some(crate::params::PowLimitChange {
+                height: 7,
+                limit: base.pow_limit,
+            }),
+            ..base
+        };
+        let later = ChainParams {
+            pow_limit_change: eased
+                .pow_limit_change
+                .map(|c| crate::params::PowLimitChange { height: 8, ..c }),
+            ..base
+        };
+        assert_ne!(
+            rules_digest(&base, &vk),
+            rules_digest(&eased, &vk),
+            "a store built before a limit change is refused"
+        );
+        assert_ne!(rules_digest(&eased, &vk), rules_digest(&later, &vk));
         assert_ne!(
             rules_digest(&base, &vk),
             rules_digest(&ChainParams::mainnet(), &vk),

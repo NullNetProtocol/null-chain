@@ -13,7 +13,7 @@ From `ChainParams::mainnet()` / `::test()` in `crates/chain/src/params.rs`.
 | Name and ticker | Null network, `NULL` | | the unit is 100,000,000 smallest units |
 | Address prefix | `null1` | `tnull1` | bech32m human readable part; viewing keys `nullview1` / `tnullview1` |
 | Equihash `(n, k)` | `(144, 5)` | `(48, 5)` | proof-of-work; mainnet needs ~1.8 GB per solver thread, test is trivial |
-| PoW limit (nBits) | `0x1f07ffff` | `0x207fffff` | easiest allowed target; test is much easier |
+| PoW limit (nBits) | `0x1f07ffff` for heights 0-10, `0x200fffff` from height 11 | `0x207fffff` | easiest allowed target: about 8,192 and then 16 Equihash solutions per block on mainnet, 2 on test (`ChainParams::pow_limit_at`) |
 | Block interval | 120 s | 5 s | target spacing for the difficulty rule |
 | Difficulty window | 60 blocks | 6 blocks | blocks the LWMA rule averages |
 | Genesis timestamp | 1757000000 | 1000000 | ~2025-09-04 UTC on mainnet; arbitrary on test |

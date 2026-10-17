@@ -27,17 +27,19 @@ pub struct Sample {
     pub target: Target,
 }
 
-/// The target for the block after `history`, which lists the most recent
-/// headers oldest first. Fewer than `window + 1` headers yield the limit.
-/// The result is always exactly representable in compact form.
-pub fn next_target(params: &ChainParams, history: &[Sample]) -> Target {
+/// The target for the block at `height`, right after `history`, which
+/// lists the most recent headers oldest first. Fewer than `window + 1`
+/// headers yield the limit at `height`, which also caps every result. The
+/// result is always exactly representable in compact form.
+pub fn next_target(params: &ChainParams, height: u32, history: &[Sample]) -> Target {
+    let limit = params.pow_limit_at(height);
     let n = params.difficulty_window;
     let Some(window) = history
         .len()
         .checked_sub(n.saturating_add(1))
         .and_then(|start| history.get(start..))
     else {
-        return params.pow_limit;
+        return limit;
     };
     let t = params.block_interval.max(1);
     let max_solve = t.saturating_mul(6);
@@ -60,13 +62,14 @@ pub fn next_target(params: &ChainParams, history: &[Sample]) -> Target {
     // Exact when the product fits. Otherwise divide first; that can still
     // overflow when the limit is near 2^256 (the test network's is about
     // 2^255), and saturating is exact there because the result is clamped
-    // to the limit below. Mainnet's limit (about 2^243) never reaches it.
+    // to the limit below. Mainnet's limit (about 2^252 since height 11)
+    // stays below 2^255 after the product.
     let next = sum_targets.checked_mul(U256::from(weighted)).map_or_else(
         || (sum_targets / denominator).saturating_mul(U256::from(weighted)),
         |x| x / denominator,
     );
     normalize(Target::from_u256(
-        next.max(U256::one()).min(params.pow_limit.as_u256()),
+        next.max(U256::one()).min(limit.as_u256()),
     ))
 }
 
@@ -100,9 +103,13 @@ mod tests {
     #[test]
     fn too_little_history_yields_the_limit() {
         let p = params();
-        assert_eq!(next_target(&p, &[]), p.pow_limit);
+        assert_eq!(next_target(&p, 1, &[]), p.pow_limit);
         assert_eq!(
-            next_target(&p, &history(10, Target::from_u256(U256::one() << 100), 4)),
+            next_target(
+                &p,
+                1,
+                &history(10, Target::from_u256(U256::one() << 100), 4)
+            ),
             p.pow_limit
         );
     }
@@ -111,7 +118,7 @@ mod tests {
     fn on_schedule_blocks_keep_the_target() {
         let p = params();
         let target = Target::from_u256(U256::one() << 150);
-        let next = next_target(&p, &history(10, target, 5));
+        let next = next_target(&p, 1, &history(10, target, 5));
         assert_eq!(next, target);
     }
 
@@ -119,7 +126,7 @@ mod tests {
     fn results_survive_the_compact_roundtrip() {
         let p = params();
         let target = Target::from_u256((U256::one() << 150) + U256::from(12345u64));
-        let next = next_target(&p, &history(7, target, 5));
+        let next = next_target(&p, 1, &history(7, target, 5));
         assert_eq!(Target::from_compact(next.to_compact()).unwrap(), next);
     }
 
@@ -127,17 +134,17 @@ mod tests {
     fn fast_blocks_lower_the_target_and_slow_blocks_raise_it() {
         let p = params();
         let target = Target::from_u256(U256::one() << 150);
-        assert!(next_target(&p, &history(5, target, 5)) < target);
-        assert!(next_target(&p, &history(20, target, 5)) > target);
+        assert!(next_target(&p, 1, &history(5, target, 5)) < target);
+        assert!(next_target(&p, 1, &history(20, target, 5)) > target);
     }
 
     #[test]
     fn result_never_exceeds_the_limit_or_hits_zero() {
         let p = params();
         let huge = history(1_000_000, p.pow_limit, 5);
-        assert_eq!(next_target(&p, &huge), p.pow_limit);
+        assert_eq!(next_target(&p, 1, &huge), p.pow_limit);
         let tiny = history(0, Target::from_u256(U256::one()), 5);
-        assert!(next_target(&p, &tiny).as_u256() >= U256::one());
+        assert!(next_target(&p, 1, &tiny).as_u256() >= U256::one());
     }
 
     #[test]
@@ -146,8 +153,8 @@ mod tests {
         let target = Target::from_u256(U256::one() << 150);
         let mut samples = history(10, target, 5);
         samples[4].timestamp += 1_000_000;
-        let clamped = next_target(&p, &samples);
-        let six_times = next_target(&p, &{
+        let clamped = next_target(&p, 1, &samples);
+        let six_times = next_target(&p, 1, &{
             let mut s = history(10, target, 5);
             s[4].timestamp += 50;
             s
@@ -157,10 +164,10 @@ mod tests {
 
     /// The slowest history the rule accepts: every solve clamped to 6T and
     /// every target at the limit, maximising both factors of the product.
-    fn slowest_at_the_limit(p: &ChainParams) -> Vec<Sample> {
+    fn slowest_at_the_limit(p: &ChainParams, height: u32) -> Vec<Sample> {
         history(
             p.block_interval.saturating_mul(6),
-            p.pow_limit,
+            p.pow_limit_at(height),
             p.difficulty_window + 1,
         )
     }
@@ -170,9 +177,24 @@ mod tests {
         // The test network's limit is near 2^255, so the weighted product
         // overflows even after dividing by the denominator first.
         for p in [ChainParams::test(), ChainParams::mainnet()] {
-            let history = slowest_at_the_limit(&p);
-            assert_eq!(next_target(&p, &history), p.pow_limit);
+            for height in [1, 11, 1_000] {
+                let history = slowest_at_the_limit(&p, height);
+                assert_eq!(next_target(&p, height, &history), p.pow_limit_at(height));
+            }
         }
+    }
+
+    #[test]
+    fn the_limit_follows_the_height_of_the_new_block() {
+        let p = ChainParams::mainnet();
+        assert_eq!(next_target(&p, 10, &[]), p.pow_limit);
+        assert_eq!(next_target(&p, 11, &[]), p.pow_limit_at(11));
+        // A full window of launch-limit blocks solved slowly is capped by
+        // the eased limit once the new block is past the change.
+        let launch = slowest_at_the_limit(&p, 1);
+        assert_eq!(next_target(&p, 10, &launch), p.pow_limit);
+        let eased = next_target(&p, 70, &launch);
+        assert!(eased > p.pow_limit && eased <= p.pow_limit_at(70));
     }
 
     proptest::proptest! {
@@ -181,11 +203,12 @@ mod tests {
         #[test]
         fn any_history_yields_a_valid_target(
             mainnet: bool,
+            height in 0u32..100,
             solves in proptest::collection::vec(0u64..10_000, 0..80),
             targets in proptest::collection::vec(proptest::array::uniform4(proptest::num::u64::ANY), 80),
         ) {
             let p = if mainnet { ChainParams::mainnet() } else { ChainParams::test() };
-            let limit = p.pow_limit.as_u256();
+            let limit = p.pow_limit_at(height).as_u256();
             let mut timestamp = 1_000u64;
             let history: Vec<Sample> = solves
                 .iter()
@@ -197,9 +220,9 @@ mod tests {
                     Sample { timestamp, target: Target::from_u256(target) }
                 })
                 .collect();
-            let next = next_target(&p, &history);
+            let next = next_target(&p, height, &history);
             proptest::prop_assert!(next.as_u256() >= U256::one());
-            proptest::prop_assert!(next <= p.pow_limit);
+            proptest::prop_assert!(next <= p.pow_limit_at(height));
             proptest::prop_assert_eq!(Target::from_compact(next.to_compact()).unwrap(), next);
         }
     }

@@ -125,7 +125,11 @@ impl Template {
                 })
             })
             .collect::<core::result::Result<Vec<_>, null_chain::Error>>()?;
-        Ok(next_target(&self.params, &samples))
+        Ok(next_target(
+            &self.params,
+            next_height(self.parent.height)?,
+            &samples,
+        ))
     }
 
     /// Assembles the block and mines it, trying a bounded number of

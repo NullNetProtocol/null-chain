@@ -113,7 +113,7 @@ ids are `0x` hex of their 32-bit value.
 
 | Method | Parameters | Result |
 |---|---|---|
-| `getblockchaininfo` | | `network`, `height`, `best_block_hash`, `genesis_hash`, `syncing`, `branch` (at the tip), `next_branch` (for the next block), `genesis_branch`, `upgrades[{height, branch}]`, `block_interval`, `difficulty_window`, `anchor_max_age`, `max_reorg_depth`, `max_future_seconds`, `pow_limit` (compact hex), `equihash{n,k}`, `fee_per_action`, `action_classes`, `max_actions`, `proof_lengths{class: bytes}`, `max_block_transactions`, `coinbase_maturity` (blocks; 100 on mainnet, 10 on test), `coin`, `max_money`, `premine` |
+| `getblockchaininfo` | | `network`, `height`, `best_block_hash`, `genesis_hash`, `syncing`, `branch` (at the tip), `next_branch` (for the next block), `genesis_branch`, `upgrades[{height, branch}]`, `block_interval`, `difficulty_window`, `anchor_max_age`, `max_reorg_depth`, `max_future_seconds`, `pow_limit` (compact hex, the easiest target for the next block, the base of difficulty), `pow_limit_change` (`{height, limit}` or null), `equihash{n,k}`, `fee_per_action`, `action_classes`, `max_actions`, `proof_lengths{class: bytes}`, `max_block_transactions`, `coinbase_maturity` (blocks; 100 on mainnet, 10 on test), `coin`, `max_money`, `premine` |
 | `getblockcount` | | tip height |
 | `getbestblockhash` | | tip hash |
 | `getblockhash` | `height` | hash, or -1 |
@@ -141,7 +141,7 @@ relevant viewing key, through the wallet daemon of Phase 3.
 
 | Method | Parameters | Result |
 |---|---|---|
-| `getmininginfo` | | `height`, `best_block_hash`, `syncing`, `next_height`, `next_target` (compact hex), `next_target_hex`, `pow_limit`, `subsidy` (next block, smallest units), `mempool`, `work_per_second` (decimal, see below), `block_interval`, `equihash{n, k, personalization, solution_length}` |
+| `getmininginfo` | | `height`, `best_block_hash`, `syncing`, `next_height`, `next_target` (compact hex), `next_target_hex`, `pow_limit` (for the next block), `subsidy` (next block, smallest units), `mempool`, `work_per_second` (decimal, see below), `block_interval`, `equihash{n, k, personalization, solution_length}` |
 | `getblocktemplate` | `payout_address`, `longpollid` (optional) | see below |
 | `submitblock` | `template_id`, `timestamp`, `nonce` (32 bytes hex), `solution` (hex, padded to the header field) or a single `block` hex | `{status: "accepted" \| "duplicate" \| "stale", hash}`; an invalid block is error -2 with the validator's reason |
 

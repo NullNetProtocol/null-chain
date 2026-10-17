@@ -29,13 +29,26 @@ pub struct Upgrade {
     pub branch: BranchId,
 }
 
+/// A one-time change of the easiest allowed target: from `height` on,
+/// [`ChainParams::pow_limit_at`] is `limit` instead of
+/// [`ChainParams::pow_limit`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PowLimitChange {
+    /// First height whose target is bounded by `limit`.
+    pub height: u32,
+    /// The easiest allowed target from then on.
+    pub limit: Target,
+}
+
 /// The constants of one network.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChainParams {
     /// Equihash `(n, k)`.
     pub equihash: EquihashParams,
-    /// The easiest allowed target.
+    /// The easiest allowed target at genesis; see [`Self::pow_limit_at`].
     pub pow_limit: Target,
+    /// A later easiest allowed target, if the network changed it.
+    pub pow_limit_change: Option<PowLimitChange>,
     /// Target seconds between blocks.
     pub block_interval: u64,
     /// Blocks averaged by the difficulty rule.
@@ -80,6 +93,14 @@ impl ChainParams {
         self.checkpoints.last().map_or(0, |c| c.height)
     }
 
+    /// The easiest allowed target for the block at `height`.
+    pub fn pow_limit_at(&self, height: u32) -> Target {
+        match self.pow_limit_change {
+            Some(change) if height >= change.height => change.limit,
+            _ => self.pow_limit,
+        }
+    }
+
     /// The consensus branch in force at `height`: that of the last upgrade
     /// activated at or below it, or the genesis branch.
     pub fn branch_at(&self, height: u32) -> BranchId {
@@ -119,6 +140,14 @@ impl ChainParams {
         Self {
             equihash: EquihashParams::new(144, 5).expect("valid parameters"),
             pow_limit: Target::from_compact(0x1f07_ffff).expect("valid compact target"),
+            // The launch limit asked for 8,192 solutions per block, about
+            // 70 core-minutes on the seed hosts even at minimum difficulty,
+            // so the chain could not reach its interval. From the first block
+            // after launch a block needs about 16; see docs/decisions.md.
+            pow_limit_change: Some(PowLimitChange {
+                height: 11,
+                limit: Target::from_compact(0x200f_ffff).expect("valid compact target"),
+            }),
             block_interval: 120,
             difficulty_window: 60,
             genesis_timestamp: 1_757_000_000,
@@ -147,6 +176,7 @@ impl ChainParams {
         Self {
             equihash: EquihashParams::new(48, 5).expect("valid parameters"),
             pow_limit: Target::from_compact(0x207f_ffff).expect("valid compact target"),
+            pow_limit_change: None,
             // Long enough that the difficulty rule demands several nonces
             // per block; with a trivial target block finding is deterministic
             // and the miner that started first wins every block.
@@ -271,11 +301,32 @@ mod tests {
     #[test]
     fn limits_are_exactly_representable_in_compact_form() {
         for p in [ChainParams::mainnet(), ChainParams::test()] {
-            assert_eq!(
-                Target::from_compact(p.pow_limit.to_compact()).unwrap(),
-                p.pow_limit
-            );
+            for limit in [p.pow_limit, p.pow_limit_at(u32::MAX)] {
+                assert_eq!(Target::from_compact(limit.to_compact()).unwrap(), limit);
+            }
         }
+    }
+
+    #[test]
+    fn pow_limit_changes_exactly_at_its_height() {
+        let main = ChainParams::mainnet();
+        assert_eq!(main.pow_limit_at(0), main.pow_limit);
+        assert_eq!(main.pow_limit_at(10), main.pow_limit);
+        assert_eq!(main.pow_limit_at(11).to_compact(), 0x200f_ffff);
+        assert_eq!(main.pow_limit_at(u32::MAX).to_compact(), 0x200f_ffff);
+        let test = ChainParams::test();
+        assert_eq!(test.pow_limit_at(u32::MAX), test.pow_limit);
+    }
+
+    #[test]
+    fn mainnet_limit_eases_to_about_one_solution_in_sixteen() {
+        let main = ChainParams::mainnet();
+        assert!(main.pow_limit_at(11) > main.pow_limit);
+        // 2^256 / limit, the expected solutions per block at the limit.
+        let per_block = Target::MAX.as_u256() / main.pow_limit_at(11).as_u256();
+        assert_eq!(per_block, crate::target::U256::from(16u64));
+        let launch = Target::MAX.as_u256() / main.pow_limit.as_u256();
+        assert_eq!(launch, crate::target::U256::from(8192u64));
     }
 
     #[test]

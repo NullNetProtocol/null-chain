@@ -638,7 +638,13 @@ async fn mining_methods(
                 "next_height": next_height(info.height).map_or(Value::Null, |h| json!(h)),
                 "next_target": format!("{:08x}", info.next_target),
                 "next_target_hex": target_hex(info.next_target),
-                "pow_limit": format!("{:08x}", context.params.pow_limit.to_compact()),
+                "pow_limit": format!(
+                    "{:08x}",
+                    context
+                        .params
+                        .pow_limit_at(next_height(info.height).unwrap_or(u32::MAX))
+                        .to_compact()
+                ),
                 "subsidy": info.subsidy.to_string(),
                 "mempool": info.mempool,
                 "work_per_second": info.work_per_second,
@@ -982,8 +988,8 @@ async fn blockchain_info(context: &Context) -> core::result::Result<Value, RpcEr
         .iter()
         .filter_map(|class| proof_len(*class).map(|len| (class.to_string(), len)).ok())
         .collect();
-    let next =
-        next_height(height).map_or_else(|_| params.branch_at(height), |h| params.branch_at(h));
+    let next_block = next_height(height).unwrap_or(height);
+    let next = params.branch_at(next_block);
     Ok(json!({
         "network": context.network.to_string(),
         "height": height,
@@ -1002,7 +1008,12 @@ async fn blockchain_info(context: &Context) -> core::result::Result<Value, RpcEr
         "anchor_max_age": params.anchor_max_age,
         "max_reorg_depth": params.max_reorg_depth,
         "max_future_seconds": params.max_future_seconds,
-        "pow_limit": format!("{:08x}", params.pow_limit.to_compact()),
+        // The limit in force for the next block, the base of difficulty.
+        "pow_limit": format!("{:08x}", params.pow_limit_at(next_block).to_compact()),
+        "pow_limit_change": params.pow_limit_change.map(|c| json!({
+            "height": c.height,
+            "limit": format!("{:08x}", c.limit.to_compact()),
+        })),
         "equihash": { "n": params.equihash.n(), "k": params.equihash.k() },
         "fee_per_action": FEE_PER_ACTION.to_string(),
         "action_classes": ACTION_CLASSES,
