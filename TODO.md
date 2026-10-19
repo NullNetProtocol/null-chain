@@ -194,8 +194,9 @@ Tick an item only when it has tests and passes clippy.
 - [x] Miners drop a template once the best tip moves (node tip watch); a mining wallet is exempt from idle auto-lock (2026-09-28)
 - [x] Release archives: `make dist` (Linux glibc 2.28 and Windows via Zig) and a tag-triggered release workflow for Linux, Windows, and macOS (arm64 and x86_64) (2026-09-28)
 - [ ] Installers and signing: macOS .app bundle and notarization, Windows installer with the exe icon and Authenticode signing, Linux AppImage
+- [x] Activity as one list with local dates and times, All/Sent/Received/Mined filters, change hidden by default, search, and pages of 20; mined rewards dated by their paying block (2026-10-19)
 - [ ] Transaction detail view (`gettransaction`), file pickers, viewing-key export and rescan from the GUI
-- [ ] Pagination, push-driven UI updates, accessibility, native platform tests and signed packages
+- [ ] Push-driven UI updates, accessibility, native platform tests and signed packages
 - [ ] Desktop security review, including toolkit copies of secrets and shared node/wallet process
 
 ## Cross-platform

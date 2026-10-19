@@ -159,6 +159,62 @@ pub fn badge(ui: &mut Ui, text: &str, tone: Tone) {
         });
 }
 
+/// One option of a row of filters: raised and accented when selected.
+pub fn tab(ui: &mut Ui, text: &str, selected: bool) -> Response {
+    let (fill, color, stroke) = if selected {
+        (
+            theme::SURFACE_RAISED,
+            theme::ACCENT_TEXT,
+            theme::ACCENT_TEXT,
+        )
+    } else {
+        (theme::SURFACE, theme::TEXT_MUTED, theme::BORDER)
+    };
+    let label = RichText::new(text).color(color).strong();
+    ui.add(
+        Button::new(label)
+            .fill(fill)
+            .stroke(Stroke::new(theme::LINE_WIDTH, stroke))
+            .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+            .min_size(control_size())
+            .selected(selected),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A single-line text box with a placeholder; returns whether it changed.
+pub fn search_input(ui: &mut Ui, value: &mut String, hint: &str) -> bool {
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .hint_text(hint)
+            .desired_width(f32::INFINITY),
+    )
+    .changed()
+}
+
+/// Previous and next buttons around "Page x of y" for page `index`
+/// (from zero) of `count`. Returns the page to show if one was clicked.
+pub fn pager(ui: &mut Ui, index: usize, count: usize) -> Option<usize> {
+    ui.horizontal(|ui| {
+        let previous = secondary_button(ui, "‹ Newer", index > 0).clicked();
+        ui.label(
+            RichText::new(format!(
+                "Page {} of {}",
+                index.saturating_add(1),
+                count.max(1)
+            ))
+            .color(theme::TEXT_MUTED),
+        );
+        let next = secondary_button(ui, "Older ›", index.saturating_add(1) < count).clicked();
+        match (previous, next) {
+            (true, _) => Some(index.saturating_sub(1)),
+            (_, true) => Some(index.saturating_add(1)),
+            _ => None,
+        }
+    })
+    .inner
+}
+
 /// A full-width message box explaining state or a problem.
 pub fn notice(ui: &mut Ui, tone: Tone, text: &str) {
     Frame::new()

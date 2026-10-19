@@ -1,5 +1,6 @@
 //! Reading backend JSON and turning values into display text.
 
+use chrono::{DateTime, TimeZone};
 use null_node::config::Network;
 use null_protocol::address::Address;
 use null_protocol::amount::{COIN, MAX_MONEY};
@@ -39,6 +40,28 @@ pub fn coins(value: &Value, key: &str) -> String {
         .map_or_else(
             || MISSING.into(),
             |n| format!("{}.{:08}", n / COIN, n % COIN),
+        )
+}
+
+/// How dates are written: "19 Oct 2026, 14:32".
+const DATE_FORMAT: &str = "%-d %b %Y, %H:%M";
+
+/// A Unix time in seconds as a date and time in the computer's time zone,
+/// or [`MISSING`] if it is out of range.
+pub fn local_time(secs: u64) -> String {
+    time_in(&chrono::Local, secs)
+}
+
+fn time_in<Tz: TimeZone>(zone: &Tz, secs: u64) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    i64::try_from(secs)
+        .ok()
+        .and_then(|secs| DateTime::from_timestamp(secs, 0))
+        .map_or_else(
+            || MISSING.into(),
+            |time| time.with_timezone(zone).format(DATE_FORMAT).to_string(),
         )
 }
 
@@ -122,6 +145,17 @@ mod tests {
         assert_eq!(short_hash(hash), "0123456789…6789abcdef");
         assert_eq!(short_hash("abc"), "abc");
         assert_eq!(short_hash("é".repeat(30).as_str()).chars().count(), 21);
+    }
+
+    #[test]
+    fn times_are_written_in_the_given_zone_and_out_of_range_ones_are_missing() {
+        let utc = chrono::Utc;
+        let rome = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(time_in(&utc, 1_792_305_778), "18 Oct 2026, 06:42");
+        assert_eq!(time_in(&rome, 1_792_305_778), "18 Oct 2026, 08:42");
+        assert_eq!(time_in(&utc, 0), "1 Jan 1970, 00:00");
+        assert_eq!(time_in(&utc, u64::MAX), MISSING);
+        assert_ne!(local_time(1_792_305_778), MISSING);
     }
 
     #[test]

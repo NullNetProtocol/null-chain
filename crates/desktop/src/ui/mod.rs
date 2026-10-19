@@ -58,6 +58,7 @@ struct Screens {
     receive: screens::receive::Form,
     send: screens::send::Form,
     mining: screens::mining::Form,
+    activity: screens::activity::Form,
 }
 
 /// A backend request in flight and where its result goes; `None` shows
@@ -284,7 +285,7 @@ fn route(
     }
     match page {
         Page::Overview => screens::overview::show(ui, state),
-        Page::Activity => return screens::activity::show(ui, state),
+        Page::Activity => return screens.activity.show(ui, state),
         Page::Receive => return screens.receive.show(ui, state),
         Page::Send => return screens.send.show(ui, state),
         Page::Node => {}

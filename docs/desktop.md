@@ -97,8 +97,23 @@ payment can end up differing from its quote if notes arrive or other
 payments reserve some first.
 
 Receive shows the newest address, or the one picked with **Show QR**, as a
-QR code with the address alongside. Activity shows text memos on received
-notes.
+QR code with the address alongside.
+
+Activity lists sent payments and received notes together, newest first,
+twenty to a page. Each entry shows its date and time in the computer's time
+zone: a payment's creation time, or the time of the block that brought a
+note. A mined reward is dated by the block that paid it, not the later block
+where it matured. Notes from the wallet's own payments are change and are
+hidden unless **Show change** is ticked. Filters pick all entries, sent,
+received or mined ones, and search matches transaction ids, addresses,
+labels, memos and payment numbers such as `#3`. Text memos are shown on
+received notes.
+
+The backend reads each note's block once and caches its time, at most 64
+new blocks per one-second refresh, so a large wallet fills in its dates over
+a few seconds. Blocks deeper than the network's maximum reorganization depth
+stay cached; shallower ones are checked again when the tip changes. The
+cache is dropped when the wallet locks.
 
 After creating a wallet, the recovery phrase is shown once. The user must
 then type three randomly chosen words back from their written copy before

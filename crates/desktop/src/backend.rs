@@ -23,6 +23,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+use crate::block_times::{BlockFacts, BlockTimes, LOOKUPS_PER_REFRESH};
 use crate::config::{self, Mining};
 
 /// Desktop configuration; the node has no separate control socket.
@@ -114,7 +115,9 @@ pub struct Snapshot {
     pub addresses: Value,
     /// Persisted outgoing payment operations.
     pub operations: Value,
-    /// Received notes, including spent notes.
+    /// Received notes, including spent notes, each with the `time` its
+    /// block was mined (`null` until looked up) and whether it is a `mined`
+    /// reward.
     pub received: Value,
     /// Built-in miner: saved choice, whether it runs, threads, payout
     /// address, and blocks found and in the main chain.
@@ -224,6 +227,7 @@ struct State {
     miner: Option<Miner>,
     mining: Mining,
     settings: PathBuf,
+    block_times: BlockTimes,
 }
 
 async fn run(
@@ -271,6 +275,7 @@ async fn run(
         miner: None,
         mining: config.mining.clamped(),
         settings: config.settings,
+        block_times: BlockTimes::default(),
     };
     let server = tokio::spawn(jsonrpc::serve_with(listener, token, client));
     let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -314,6 +319,7 @@ impl State {
     async fn lock(&mut self) {
         // The miner pays the wallet's address, so it stops with the wallet.
         self.stop_mining();
+        self.block_times.clear();
         if let Some(service) = self.wallet.take() {
             service.shutdown().await;
         }
@@ -454,7 +460,7 @@ impl State {
         }
     }
 
-    async fn snapshot(&self, addr: SocketAddr) -> std::result::Result<Snapshot, RpcError> {
+    async fn snapshot(&mut self, addr: SocketAddr) -> std::result::Result<Snapshot, RpcError> {
         let params = Params::new(json!([]));
         let mut snapshot = Snapshot {
             ready: true,
@@ -476,8 +482,40 @@ impl State {
             snapshot.addresses = service.daemon.call("listaddresses", &params).await?;
             snapshot.operations = service.daemon.call("listoperations", &params).await?;
             snapshot.received = service.daemon.call("listreceived", &params).await?;
+            self.date_notes(&mut snapshot.received).await?;
         }
         Ok(snapshot)
+    }
+
+    /// Adds block times to received notes, reading blocks it has not cached
+    /// yet and dropping cached ones a reorganization replaced.
+    async fn date_notes(&mut self, notes: &mut Value) -> std::result::Result<(), RpcError> {
+        let params = self.network.params();
+        if let Response::Status { height, hash, .. } = self.node.request(Request::Status).await? {
+            for stale in self
+                .block_times
+                .follow_tip(hash, height, params.max_reorg_depth)
+            {
+                let current = match self.node.request(Request::Hash(stale)).await? {
+                    Response::Hash(hash) => hash,
+                    _ => None,
+                };
+                if current != self.block_times.get(stale).map(|b| b.hash) {
+                    self.block_times.remove(stale);
+                }
+            }
+        }
+        let maturity = params.coinbase_maturity;
+        for height in self
+            .block_times
+            .missing(notes, maturity, LOOKUPS_PER_REFRESH)
+        {
+            if let Response::Block(Some(block)) = self.node.request(Request::Block(height)).await? {
+                self.block_times.insert(height, BlockFacts::from(&*block));
+            }
+        }
+        self.block_times.annotate(notes, maturity);
+        Ok(())
     }
 
     async fn mining_json(&self) -> std::result::Result<Value, RpcError> {
@@ -497,7 +535,7 @@ impl State {
         }))
     }
 
-    async fn publish(&self, updates: &watch::Sender<Snapshot>, addr: SocketAddr) {
+    async fn publish(&mut self, updates: &watch::Sender<Snapshot>, addr: SocketAddr) {
         match self.snapshot(addr).await {
             Ok(snapshot) => {
                 updates.send_replace(snapshot);

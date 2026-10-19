@@ -2,5 +2,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod backend;
+pub mod block_times;
 pub mod config;
 pub mod desktop_entry;
