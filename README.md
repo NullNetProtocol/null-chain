@@ -5,10 +5,12 @@ Anonymity first, performance second, nothing transparent. Ticker `NULL`;
 addresses start with `null1` (`tnull1` on the test network); the node is
 `nulld` and the wallet daemon `null-wallet-rpc`.
 
-Status: a working local testnet. Nodes mine, sync, relay transactions
-over encrypted connections with Dandelion++, and a command line wallet
-scans balances and sends payments. Every transaction is a zero-knowledge
-proof over a Halo2 circuit; there are no transparent addresses.
+Status: mainnet is live (release 0.1.6). Nodes mine, sync and relay
+transactions over encrypted connections with Dandelion++, and a command
+line and desktop wallet scan balances and send payments. Every
+transaction is a zero-knowledge proof over a Halo2 circuit; there are no
+transparent addresses. A separate test network is available for
+development.
 
 The roadmap is in [`TODO.md`](TODO.md), engineering rules in
 [`CLAUDE.md`](CLAUDE.md), design decisions in
