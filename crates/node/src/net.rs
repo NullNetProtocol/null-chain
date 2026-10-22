@@ -23,6 +23,11 @@ use crate::{Error, Result};
 
 /// Messages queued to a peer before it is considered stuck.
 const OUTBOX_CAPACITY: usize = 1_024;
+/// Bounds DNS, TCP and proxy setup, including slower Tor circuit creation.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounds an I2P stream: a lease-set lookup and tunnel build often take
+/// longer than a Tor circuit.
+const I2P_DIAL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Inbound connections allowed in the handshake at once. The node's
 /// inbound cap only counts peers that finished the handshake, so without
 /// this a client could hold any number of sockets open by staying silent.
@@ -119,28 +124,11 @@ pub struct Route {
 /// [`Event::DialedSelf`] instead of connecting.
 pub fn dial(route: Route, id: PeerId, events: mpsc::Sender<Event>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let Route {
-            target,
-            proxy,
-            i2p,
-            own,
-        } = route;
-        let stream = match (i2p, proxy) {
-            (Some(session), _) if i2p::is_i2p(&target) => {
-                session.connect(i2p::destination_of(&target)).await
-            }
-            (_, Some(proxy)) => socks5_connect(proxy, &target).await,
-            _ => match connect_direct(&target, own).await {
-                Ok(Some(stream)) => Ok(stream),
-                Ok(None) => {
-                    let _ = events.send(Event::DialedSelf { id, target }).await;
-                    return;
-                }
-                Err(error) => Err(error),
-            },
-        };
+        let limit = dial_timeout(via_i2p(&route));
+        let stream = tokio::time::timeout(limit, connect_route(&route)).await;
+        let target = route.target;
         match stream {
-            Ok(stream) => {
+            Ok(Ok(Some(stream))) => {
                 let addr = stream
                     .peer_addr()
                     .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
@@ -159,11 +147,39 @@ pub fn dial(route: Route, id: PeerId, events: mpsc::Sender<Event>) -> JoinHandle
                 )
                 .await;
             }
-            Err(_) => {
+            Ok(Ok(None)) => {
+                let _ = events.send(Event::DialedSelf { id, target }).await;
+            }
+            _ => {
                 let _ = events.send(Event::DialFailed { id, target }).await;
             }
         }
     })
+}
+
+/// Whether `route` reaches its target through the SAM bridge.
+fn via_i2p(route: &Route) -> bool {
+    route.i2p.is_some() && i2p::is_i2p(&route.target)
+}
+
+/// How long a dial may take before it counts as failed.
+fn dial_timeout(via_i2p: bool) -> Duration {
+    if via_i2p {
+        I2P_DIAL_TIMEOUT
+    } else {
+        DIAL_TIMEOUT
+    }
+}
+
+async fn connect_route(route: &Route) -> Result<Option<TcpStream>> {
+    match (&route.i2p, route.proxy) {
+        (Some(session), _) if via_i2p(route) => session
+            .connect(i2p::destination_of(&route.target))
+            .await
+            .map(Some),
+        (_, Some(proxy)) => socks5_connect(proxy, &route.target).await.map(Some),
+        _ => connect_direct(&route.target, route.own).await,
+    }
 }
 
 /// Resolves `target` and connects to the first of its addresses that is not
@@ -258,6 +274,7 @@ async fn run_connection(accepted: Accepted, events: mpsc::Sender<Event>) {
         permit,
         handshake_timeout,
     } = accepted;
+    let local = stream.local_addr().ok();
     let established = establish_within(stream, role, handshake_timeout).await;
     drop(permit);
     let Ok((writer, reader)) = established else {
@@ -270,6 +287,7 @@ async fn run_connection(accepted: Accepted, events: mpsc::Sender<Event>) {
             id,
             direction,
             addr,
+            local,
             target,
             outbox,
         })
@@ -316,6 +334,18 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+
+    #[test]
+    fn i2p_dials_get_longer_than_direct_and_proxied_ones() {
+        assert!(dial_timeout(true) > dial_timeout(false));
+        let route = Route {
+            target: "peer.b32.i2p:0".into(),
+            proxy: Some("127.0.0.1:9050".parse().unwrap()),
+            i2p: None,
+            own: None,
+        };
+        assert!(!via_i2p(&route), "no SAM session: the proxy is used");
+    }
 
     /// With one pending slot, a silent client blocks the next accept until
     /// its handshake deadline passes; then a real client gets through.

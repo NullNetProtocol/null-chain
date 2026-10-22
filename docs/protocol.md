@@ -286,6 +286,37 @@ before both. A peer with another protocol version, another genesis, or
 our own nonce is dropped. Peers ping after 60 idle seconds and drop after
 120 unanswered.
 
+Discovery uses the existing `Addr`/`GetAddr` messages without changing the
+handshake or protocol version. After handshaking, the dialing side requests
+addresses and each side that listens on a direct public endpoint sends a
+singleton `Addr` announcing it. Inbound peers are never asked for address
+lists: per exchange period a node accepts at most 101 gossiped addresses
+from an outbound peer (a reply plus its announcement) and one from an
+inbound peer, and gossip never refreshes the timestamp of a known entry. A wildcard listener uses the local interface of the
+connection, with the listener's bound port; a `[::]` listener also
+announces over IPv4 only when its socket is dual-stack (`IPV6_V6ONLY` off),
+which Windows and the BSDs do not default to. `--advertise` overrides the
+endpoint for NAT or port forwarding; it requires an inbound listener and
+cannot be combined with proxy/I2P operation. Such transports never cause
+automatic IP announcements. Mainnet gossip accepts only public IPs and
+nonzero ports; testnet also accepts local addresses for isolated networks.
+
+Received addresses are candidates, not yet eligible for relay. Only a
+successful outbound Noise and version handshake on the same genesis
+verifies an endpoint. Verified endpoints are shared only in `GetAddr`
+replies, never pushed when they are verified, which would reveal whom a
+node just dialed. A reply samples at most 100 verified, unbanned addresses,
+all stamped with the current time rounded down to the hour. Verification
+expires after 24 hours unless refreshed by a live outbound connection.
+Gossip timestamps do not renew it. Address exchange repeats every ten
+minutes; replies are limited to once per minute per connection. Dials time out after
+30 seconds, or two minutes for I2P. Only dial failures, handshake timeouts
+and peers closing during the handshake count as failed attempts. Failed
+candidates back off from one minute up to one hour. When all eight regular
+outbound slots are full, one additional temporary connection can verify a
+candidate, then closes without syncing. Dial, Noise and version-handshake
+stages have deadlines. The address book remains in memory.
+
 Synchronization: a node behind its peer sends GetHeaders with a locator
 (its last ten hashes, then doubling steps, then genesis); the peer answers
 from the first locator hash on its main chain, up to 2000 headers; the

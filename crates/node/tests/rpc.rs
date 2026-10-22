@@ -101,6 +101,7 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
         network: Network::Test,
         datadir: None,
         listen: None,
+        advertise: None,
         connect: Vec::new(),
         proxy: None,
         i2p: None,

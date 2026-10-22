@@ -33,6 +33,7 @@ rand_core.workspace = true
 subtle.workspace = true
 zeroize.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+socket2.workspace = true
 
 [dev-dependencies]
 rand_chacha.workspace = true

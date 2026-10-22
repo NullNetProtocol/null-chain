@@ -108,7 +108,10 @@ Tick an item only when it has tests and passes clippy.
 - [x] Rules digest covers every consensus parameter and `CONSENSUS_REVISION`; a mismatching chain is refused naming its directory (2026-09-29)
 - [x] Bans per IP (loopback and proxied peers exempt), bounded ban list; peer-closed connections logged with duration (2026-09-29)
 - [x] Never redial ourselves: skip seed names resolving to our listen address; per-connection version nonces identify other routes back to us (2026-09-28)
-- [x] Peer discovery bootstraps: dialed peers enter the address book and are gossiped, so a node reaches peers it was never configured with (self-advertising the listen address is future work)
+- [x] Peer discovery bootstraps: dialed peers enter the address book and are gossiped, so a node reaches peers it was never configured with
+- [x] Listening nodes advertise through existing `Addr` messages; direct public interfaces are automatic, `--advertise` / desktop `advertise` overrides forwarded ports; endpoints are handshaken before relay, full nodes use one bounded probe, and established peers refresh every ten minutes; private transports suppress announcements (2026-10-20)
+- [x] Discovery hardening: verified addresses pulled, never pushed, with hour-rounded timestamps; only outbound peers asked for lists, per-peer gossip allowance, gossip cannot renew entries; IPv4 announced from `[::]` only when the socket is dual-stack; longer I2P dial deadline; failures recorded against the dialed endpoint; desktop validates `advertise` (2026-10-22)
+- [ ] Cache `GetAddr` replies per period (as Bitcoin does) so reconnecting peers cannot diff samples to infer current outbound peers
 - [x] Headers-first sync state machine: locator, chained header acceptance, bounded in-flight block requests with timeouts
 - [x] Dandelion++ routing state: epochs, stem map, fluff probability, embargo timers
 - [x] `--proxy` routes every outbound connection through SOCKS5, which reaches `.onion` peers via Tor; no feature flag needed

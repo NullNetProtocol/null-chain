@@ -40,6 +40,9 @@ pub struct Args {
     /// Accept incoming peer connections at this address.
     #[arg(long)]
     pub listen: Option<SocketAddr>,
+    /// Public IP:port to announce when using a forwarded listening port.
+    #[arg(long)]
+    pub advertise: Option<SocketAddr>,
     /// Combined authenticated RPC listener, loopback only.
     #[arg(long)]
     pub rpc: Option<SocketAddr>,
@@ -132,6 +135,7 @@ struct Settings {
     rpc: SocketAddr,
     connect: Vec<String>,
     listen: Option<SocketAddr>,
+    advertise: Option<SocketAddr>,
     proxy: Option<SocketAddr>,
     wallet: Option<PathBuf>,
     /// Minutes without input before the GUI locks the wallet; 0 disables.
@@ -151,6 +155,7 @@ impl Default for Settings {
             rpc: SocketAddr::from(([127, 0, 0, 1], 18448)),
             connect: Vec::new(),
             listen: None,
+            advertise: None,
             proxy: None,
             wallet: None,
             lock_after_minutes: DEFAULT_LOCK_MINUTES,
@@ -190,6 +195,9 @@ impl Settings {
         }
         if args.listen.is_some() {
             self.listen = args.listen;
+        }
+        if args.advertise.is_some() {
+            self.advertise = args.advertise;
         }
         if args.proxy.is_some() {
             self.proxy = args.proxy;
@@ -250,6 +258,25 @@ impl Startup {
             .as_ref()
             .or_else(|| settings.wallets.get(&network.to_string()))
             .map_or_else(|| paths::wallet_file(&network_dir), |p| network_dir.join(p));
+        let node = NodeConfig {
+            network,
+            datadir: Some(paths::chain_dir(&network_dir)),
+            listen: settings.listen,
+            advertise: settings.advertise,
+            // Saved peers first, then the network's seeds, as nulld does.
+            // Seeds come from the release, never from null.conf.
+            connect: settings
+                .connect
+                .iter()
+                .cloned()
+                .chain(network.seeds().iter().map(ToString::to_string))
+                .collect(),
+            proxy: settings.proxy,
+            ..NodeConfig::test()
+        };
+        // nulld's clap rules do not cover null.conf, so catch a conflicting
+        // `advertise` here rather than when the backend starts.
+        node.validate()?;
         private_directory(&data)?;
         private_directory(&network_dir)?;
         private_directory(&paths::chain_dir(&network_dir))?;
@@ -263,20 +290,7 @@ impl Startup {
         let mining = settings.mining();
         Ok(Self {
             backend: backend::Config {
-                node: NodeConfig {
-                    network,
-                    datadir: Some(paths::chain_dir(&network_dir)),
-                    listen: settings.listen,
-                    // Saved peers first, then the network's seeds, as nulld does.
-                    // Seeds come from the release, never from null.conf.
-                    connect: settings
-                        .connect
-                        .into_iter()
-                        .chain(network.seeds().iter().map(ToString::to_string))
-                        .collect(),
-                    proxy: settings.proxy,
-                    ..NodeConfig::test()
-                },
+                node,
                 rpc: settings.rpc,
                 token_file: network_dir.join("desktop-rpc.token"),
                 wallet: wallet.clone(),
@@ -416,11 +430,38 @@ mod tests {
     }
 
     #[test]
+    fn advertised_listener_is_loaded_and_cli_overrides_are_not_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("null.conf");
+        let text = "network = 'test'\nlisten = '0.0.0.0:19000'\nadvertise = '127.0.0.1:20000'\n";
+        fs::write(&config, text).unwrap();
+        let mut args = Args {
+            datadir: Some(dir.path().into()),
+            ..Args::default()
+        };
+        let startup = Startup::load(&args).unwrap();
+        assert_eq!(
+            startup.backend.node.listen,
+            Some("0.0.0.0:19000".parse().unwrap())
+        );
+        assert_eq!(
+            startup.backend.node.advertise,
+            Some("127.0.0.1:20000".parse().unwrap())
+        );
+        args.advertise = Some("127.0.0.1:30000".parse().unwrap());
+        let startup = Startup::load(&args).unwrap();
+        assert_eq!(startup.backend.node.advertise, args.advertise);
+        assert_eq!(fs::read_to_string(config).unwrap(), text);
+    }
+
+    #[test]
     fn invalid_configuration_is_reported_without_being_replaced() {
         let dir = tempfile::tempdir().unwrap();
         for text in [
             "network = 'invalid'",
             "rpc = '0.0.0.0:18448'",
+            "network = 'test'\nadvertise = '127.0.0.1:19000'",
+            "network = 'test'\nlisten = '0.0.0.0:19000'\nadvertise = '127.0.0.1:19000'\nproxy = '127.0.0.1:9050'",
             "unknown = true",
             "broken = [",
         ] {

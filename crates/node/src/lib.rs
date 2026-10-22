@@ -23,6 +23,7 @@
 
 pub mod cli;
 pub mod config;
+mod discovery;
 mod error;
 pub mod faucet;
 pub mod http;

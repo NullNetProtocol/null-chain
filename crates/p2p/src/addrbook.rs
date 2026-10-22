@@ -16,6 +16,19 @@ pub const MAX_AGE: u64 = 30 * 24 * 60 * 60;
 pub const BAN_SECONDS: u64 = 24 * 60 * 60;
 /// Banned IP addresses the book remembers at most.
 pub const MAX_BANS: usize = 10_000;
+/// Seconds a successful outbound handshake vouches for an address.
+pub const VERIFIED_SECONDS: u64 = 24 * 60 * 60;
+/// Minimum time between attempts, doubling after each failure up to
+/// [`MAX_RETRY_SECONDS`].
+pub const RETRY_SECONDS: u64 = 60;
+/// Longest delay between attempts at an address that keeps failing.
+pub const MAX_RETRY_SECONDS: u64 = 60 * 60;
+/// Failures after which the retry delay stops doubling; bounds the shift.
+const MAX_BACKOFF_DOUBLINGS: u32 = 6;
+/// Granularity of the timestamp on shared addresses. Every address in a
+/// sample carries the same rounded time, so a peer cannot tell from it
+/// when, or in which order, this node connected to each one.
+pub const SHARED_TIME_GRANULARITY: u64 = 60 * 60;
 
 /// An IP address as the book stores it: IPv4 as IPv4-mapped IPv6.
 pub type Ip = [u8; 16];
@@ -24,6 +37,16 @@ pub type Ip = [u8; 16];
 struct Entry {
     addr: PeerAddr,
     failures: u32,
+    verified_at: Option<u64>,
+    retry_at: u64,
+}
+
+impl Entry {
+    /// Whether a recent outbound handshake verified this address.
+    fn is_verified(&self, now: u64) -> bool {
+        self.verified_at
+            .is_some_and(|at| now.saturating_sub(at) < VERIFIED_SECONDS)
+    }
 }
 
 /// The address book.
@@ -52,32 +75,41 @@ impl AddressBook {
         self.entries.is_empty()
     }
 
-    /// Records an address, keeping the newest timestamp. Addresses from
-    /// the future or too old are ignored, and the book stays bounded.
+    /// Records a new address. Addresses from the future or too old are
+    /// ignored, and the book stays bounded. Gossip never refreshes a known
+    /// entry, only [`AddressBook::connected`] does, so a peer re-sending an
+    /// address cannot keep it alive past [`MAX_AGE`]. A slightly future
+    /// timestamp is stored as `now` for the same reason.
     pub fn add(&mut self, addr: PeerAddr, now: u64) -> bool {
         if addr.last_seen > now.saturating_add(MAX_FUTURE)
             || now.saturating_sub(addr.last_seen) > MAX_AGE
+            || self.entries.contains_key(&addr.key())
+            || self.entries.len() >= MAX_KNOWN
         {
             return false;
         }
-        if let Some(entry) = self.entries.get_mut(&addr.key()) {
-            entry.addr.last_seen = entry.addr.last_seen.max(addr.last_seen);
-            return false;
-        }
-        if self.entries.len() >= MAX_KNOWN {
-            return false;
-        }
-        self.entries.insert(addr.key(), Entry { addr, failures: 0 });
+        self.entries.insert(
+            addr.key(),
+            Entry {
+                addr: PeerAddr {
+                    last_seen: addr.last_seen.min(now),
+                    ..addr
+                },
+                failures: 0,
+                verified_at: None,
+                retry_at: 0,
+            },
+        );
         true
     }
 
     /// Records addresses received in an `Addr` message, at most the
-    /// protocol limit.
-    pub fn add_many(&mut self, addrs: &[PeerAddr], now: u64) -> usize {
+    /// protocol limit, and returns how many were new.
+    pub fn add_many(&mut self, addrs: impl IntoIterator<Item = PeerAddr>, now: u64) -> usize {
         addrs
-            .iter()
+            .into_iter()
             .take(MAX_ADDRESSES)
-            .filter(|a| self.add(**a, now))
+            .filter(|a| self.add(*a, now))
             .count()
     }
 
@@ -107,6 +139,17 @@ impl AddressBook {
     pub fn failed(&mut self, key: ([u8; 16], u16)) {
         if let Some(e) = self.entries.get_mut(&key) {
             e.failures = e.failures.saturating_add(1);
+            e.verified_at = None;
+        }
+    }
+
+    /// Reserves an address while dialing and applies a bounded retry delay.
+    pub fn attempted(&mut self, key: (Ip, u16), now: u64) {
+        if let Some(e) = self.entries.get_mut(&key) {
+            let delay = RETRY_SECONDS
+                .saturating_mul(1u64 << e.failures.min(MAX_BACKOFF_DOUBLINGS))
+                .min(MAX_RETRY_SECONDS);
+            e.retry_at = now.saturating_add(delay);
         }
     }
 
@@ -115,6 +158,7 @@ impl AddressBook {
         if let Some(e) = self.entries.get_mut(&key) {
             e.failures = 0;
             e.addr.last_seen = now;
+            e.verified_at = Some(now);
         }
     }
 
@@ -126,10 +170,36 @@ impl AddressBook {
         now: u64,
         rng: &mut impl RngCore,
     ) -> Option<PeerAddr> {
+        self.select_candidate(exclude, now, rng, false)
+    }
+
+    /// An unverified candidate for a bounded reachability probe.
+    pub fn unverified_candidate(
+        &self,
+        exclude: &[(Ip, u16)],
+        now: u64,
+        rng: &mut impl RngCore,
+    ) -> Option<PeerAddr> {
+        self.select_candidate(exclude, now, rng, true)
+    }
+
+    fn select_candidate(
+        &self,
+        exclude: &[(Ip, u16)],
+        now: u64,
+        rng: &mut impl RngCore,
+        unverified_only: bool,
+    ) -> Option<PeerAddr> {
         let mut pool: Vec<&Entry> = self
             .entries
             .values()
-            .filter(|e| !self.is_banned(&e.addr.ip, now) && !exclude.contains(&e.addr.key()))
+            .filter(|e| {
+                e.retry_at <= now
+                    && (!unverified_only || !e.is_verified(now))
+                    && now.saturating_sub(e.addr.last_seen) <= MAX_AGE
+                    && !self.is_banned(&e.addr.ip, now)
+                    && !exclude.contains(&e.addr.key())
+            })
             .collect();
         if pool.is_empty() {
             return None;
@@ -146,13 +216,26 @@ impl AddressBook {
             .map(|e| e.addr)
     }
 
-    /// A random sample of unbanned addresses to share with a peer.
+    /// Whether a recent outbound handshake verified this address.
+    pub fn verified(&self, key: (Ip, u16), now: u64) -> bool {
+        self.entries.get(&key).is_some_and(|e| e.is_verified(now))
+    }
+
+    /// A random sample of recently verified, unbanned addresses to share.
+    /// Gossip cannot extend the lifetime of our own reachability checks.
+    /// Every address carries `now` rounded down to
+    /// [`SHARED_TIME_GRANULARITY`] rather than its verification time, which
+    /// would single out the peers this node is connected to right now.
     pub fn sample(&self, count: usize, now: u64, rng: &mut impl RngCore) -> Vec<PeerAddr> {
+        let shared_time = now.saturating_sub(now % SHARED_TIME_GRANULARITY);
         let mut pool: Vec<PeerAddr> = self
             .entries
             .values()
-            .filter(|e| !self.is_banned(&e.addr.ip, now))
-            .map(|e| e.addr)
+            .filter(|e| e.is_verified(now) && !self.is_banned(&e.addr.ip, now))
+            .map(|e| PeerAddr {
+                last_seen: shared_time,
+                ..e.addr
+            })
             .collect();
         for i in (1..pool.len()).rev() {
             let j = crate::random::index(rng, i.saturating_add(1)).unwrap_or(0);
@@ -182,13 +265,34 @@ mod tests {
     }
 
     #[test]
-    fn adds_deduplicates_and_keeps_the_newest_timestamp() {
+    fn adds_deduplicates_and_gossip_does_not_refresh_known_entries() {
         let mut book = AddressBook::new();
         assert!(book.add(addr(1, 100), 100));
         assert!(!book.add(addr(1, 150), 200));
         assert_eq!(book.len(), 1);
         let mut rng = ChaCha20Rng::seed_from_u64(1);
-        assert_eq!(book.candidate(&[], 200, &mut rng).unwrap().last_seen, 150);
+        assert_eq!(book.candidate(&[], 200, &mut rng).unwrap().last_seen, 100);
+    }
+
+    #[test]
+    fn re_gossiped_addresses_still_expire_but_handshakes_keep_them() {
+        let mut book = AddressBook::new();
+        book.add(addr(1, 100), 100);
+        book.add(addr(2, 100), 100);
+        let later = 100 + MAX_AGE;
+        book.add(addr(1, later), later);
+        book.connected(addr(2, 0).key(), later);
+        book.prune(later + 1);
+        assert_eq!(book.len(), 1);
+        assert!(book.verified(addr(2, 0).key(), later + 1));
+    }
+
+    #[test]
+    fn future_timestamps_are_stored_as_now() {
+        let mut book = AddressBook::new();
+        assert!(book.add(addr(1, 100 + MAX_FUTURE), 100));
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        assert_eq!(book.candidate(&[], 100, &mut rng).unwrap().last_seen, 100);
     }
 
     #[test]
@@ -264,7 +368,7 @@ mod tests {
             addr(1, 0).ip
         );
         book.connected(addr(1, 0).key(), 300);
-        assert_eq!(book.add_many(&[addr(3, 300)], 300), 1);
+        assert_eq!(book.add_many([addr(3, 300), addr(3, 300)], 300), 1);
     }
 
     #[test]
@@ -272,10 +376,78 @@ mod tests {
         let mut book = AddressBook::new();
         for i in 1..=20u8 {
             book.add(addr(i, 100), 100);
+            book.connected(addr(i, 100).key(), 100);
         }
         let mut rng = ChaCha20Rng::seed_from_u64(4);
         assert_eq!(book.sample(5, 100, &mut rng).len(), 5);
         book.prune(100 + MAX_AGE + 1);
         assert!(book.is_empty());
+    }
+
+    #[test]
+    fn gossip_is_shared_only_after_verification_and_cannot_renew_it() {
+        let mut book = AddressBook::new();
+        let mut rng = ChaCha20Rng::seed_from_u64(5);
+        book.add(addr(1, 100), 100);
+        assert!(book.sample(100, 100, &mut rng).is_empty());
+        book.connected(addr(1, 100).key(), 100);
+        assert!(book.unverified_candidate(&[], 100, &mut rng).is_none());
+        book.add(addr(1, 200), 200);
+        assert_eq!(book.sample(100, 200, &mut rng), vec![addr(1, 0)]);
+        assert!(book
+            .sample(100, 100 + VERIFIED_SECONDS, &mut rng)
+            .is_empty());
+        assert!(book
+            .unverified_candidate(&[], 100 + VERIFIED_SECONDS, &mut rng)
+            .is_some());
+        book.connected(addr(1, 100).key(), 300);
+        book.failed(addr(1, 100).key());
+        assert!(book.sample(100, 300, &mut rng).is_empty());
+    }
+
+    #[test]
+    fn shared_timestamps_are_rounded_and_identical() {
+        let mut book = AddressBook::new();
+        let mut rng = ChaCha20Rng::seed_from_u64(8);
+        let now = 5 * SHARED_TIME_GRANULARITY + 17;
+        for (i, seen) in [(1, now - 1_000), (2, now - 1)] {
+            book.add(addr(i, seen), seen);
+            book.connected(addr(i, 0).key(), seen);
+        }
+        let sample = book.sample(100, now, &mut rng);
+        assert_eq!(sample.len(), 2);
+        assert!(sample
+            .iter()
+            .all(|a| a.last_seen == 5 * SHARED_TIME_GRANULARITY));
+    }
+
+    #[test]
+    fn retry_delay_doubles_and_is_capped() {
+        let mut book = AddressBook::new();
+        let mut rng = ChaCha20Rng::seed_from_u64(9);
+        book.add(addr(1, 100), 100);
+        for _ in 0..=MAX_BACKOFF_DOUBLINGS {
+            book.failed(addr(1, 0).key());
+        }
+        book.attempted(addr(1, 0).key(), 100);
+        let retry = 100 + MAX_RETRY_SECONDS;
+        assert!(book.candidate(&[], retry - 1, &mut rng).is_none());
+        assert!(book.candidate(&[], retry, &mut rng).is_some());
+    }
+
+    #[test]
+    fn failed_candidates_back_off_even_when_announced_again() {
+        let mut book = AddressBook::new();
+        let mut rng = ChaCha20Rng::seed_from_u64(6);
+        let a = addr(1, 100);
+        book.add(a, 100);
+        book.attempted(a.key(), 100);
+        book.failed(a.key());
+        book.add(addr(1, 110), 110);
+        assert!(book.candidate(&[], 159, &mut rng).is_none());
+        assert!(book.candidate(&[], 160, &mut rng).is_some());
+        book.attempted(a.key(), 160);
+        assert!(book.candidate(&[], 279, &mut rng).is_none());
+        assert!(book.candidate(&[], 280, &mut rng).is_some());
     }
 }

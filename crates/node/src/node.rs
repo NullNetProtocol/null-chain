@@ -29,7 +29,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::config::{Config, MEMPOOL_CAPACITY, OUTBOUND_TARGET};
+use crate::config::{Config, Network, MEMPOOL_CAPACITY, OUTBOUND_TARGET};
+use crate::discovery::{self, EXCHANGE_SECONDS, MAX_PROBES, REPLY_SECONDS, SAMPLE_SIZE};
 use crate::i2p::SamSession;
 use crate::logging;
 use crate::metrics::Metrics;
@@ -62,6 +63,8 @@ pub enum Event {
         direction: Direction,
         /// Remote socket address; the proxy's when one is used.
         addr: SocketAddr,
+        /// Local interface address, used to advertise wildcard listeners.
+        local: Option<SocketAddr>,
         /// What was dialed, or the remote address for inbound peers.
         target: String,
         /// Where to queue messages for it.
@@ -285,6 +288,12 @@ struct PeerHandle {
     outbox: mpsc::Sender<Message>,
     addr: SocketAddr,
     target: String,
+    local: Option<SocketAddr>,
+    /// Tick of the last `GetAddr` we answered, for [`REPLY_SECONDS`].
+    last_getaddr: Option<u64>,
+    /// Gossiped addresses still accepted from this peer until the next
+    /// exchange; see [`discovery::addr_allowance`].
+    addr_allowance: usize,
     /// When the connection finished its handshake.
     connected_at: std::time::Instant,
 }
@@ -316,6 +325,7 @@ struct OwnEndpoints {
 
 /// The node state, owned by the loop task.
 pub struct Node {
+    network: Network,
     params: ChainParams,
     chain: Chain,
     mempool: Mempool,
@@ -325,9 +335,14 @@ pub struct Node {
     sync_peer: Option<PeerId>,
     peers: HashMap<PeerId, PeerHandle>,
     dialing: HashMap<PeerId, String>,
+    /// Short reachability checks when all regular outbound slots are occupied.
+    probes: HashSet<PeerId>,
     configured: Vec<String>,
     /// Our bound listen address, never dialed.
     listen_addr: Option<SocketAddr>,
+    /// Whether the listener takes IPv4 too; see [`discovery::accepts_ipv4`].
+    listen_accepts_ipv4: bool,
+    advertise: Option<SocketAddr>,
     /// Targets and addresses that turned out to be this node; never redialed.
     own: OwnEndpoints,
     proxy: Option<SocketAddr>,
@@ -408,6 +423,7 @@ impl Handle {
 /// # Errors
 /// Fails if the store or a socket cannot be opened or key generation fails.
 pub async fn spawn(config: Config) -> Result<Handle> {
+    config.validate()?;
     let mut tasks = JoinSet::new();
     let params = config.network.params();
     let chain = open_chain(&config, params).await?;
@@ -419,12 +435,13 @@ pub async fn spawn(config: Config) -> Result<Handle> {
     let (events, receiver) = mpsc::channel(4_096);
     let tip = watch::Sender::new(chain.tip()?.hash);
 
-    let listen_addr = match bind(config.listen).await? {
+    let (listen_addr, listen_accepts_ipv4) = match bind(config.listen).await? {
         Some((listener, local)) => {
+            let accepts_ipv4 = discovery::accepts_ipv4(&listener);
             tasks.spawn(crate::net::listen(listener, events.clone(), 1 << 40));
-            Some(local)
+            (Some(local), accepts_ipv4)
         }
-        None => None,
+        None => (None, false),
     };
     let (rpc_addr, rpc_http_addr, rpc_token) = serve_rpc(&config, &events, &mut tasks).await?;
     let metrics_addr = match bind(config.metrics).await? {
@@ -461,6 +478,7 @@ pub async fn spawn(config: Config) -> Result<Handle> {
 
     let rng = StdRng::from_entropy();
     let node = Node {
+        network: config.network,
         params,
         chain,
         mempool: Mempool::new(MEMPOOL_CAPACITY),
@@ -470,8 +488,11 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         sync_peer: None,
         peers: HashMap::new(),
         dialing: HashMap::new(),
+        probes: HashSet::new(),
         configured: config.connect.clone(),
         listen_addr,
+        listen_accepts_ipv4,
+        advertise: config.advertise,
         own: OwnEndpoints::default(),
         proxy: config.proxy,
         i2p,
@@ -598,11 +619,19 @@ fn addr_key(addr: SocketAddr) -> ([u8; 16], u16) {
     (ip, addr.port())
 }
 
-fn key_target(key: ([u8; 16], u16)) -> String {
+/// The address-book key of a dialed `target`, or `None` for a hostname,
+/// which the book never holds. Attempts and failures are recorded under
+/// this key, never under the socket address, which is the proxy's when
+/// one is used.
+fn dialed_key(target: &str) -> Option<([u8; 16], u16)> {
+    target.parse::<SocketAddr>().ok().map(addr_key)
+}
+
+fn key_addr(key: ([u8; 16], u16)) -> SocketAddr {
     let ip = std::net::Ipv6Addr::from(key.0);
     ip.to_ipv4_mapped().map_or_else(
-        || SocketAddr::from((ip, key.1)).to_string(),
-        |v4| SocketAddr::from((v4, key.1)).to_string(),
+        || SocketAddr::from((ip, key.1)),
+        |v4| SocketAddr::from((v4, key.1)),
     )
 }
 
@@ -625,9 +654,10 @@ impl Node {
                 id,
                 direction,
                 addr,
+                local,
                 target,
                 outbox,
-            } => self.on_connected(id, direction, addr, target, outbox),
+            } => self.on_connected(id, direction, addr, local, target, outbox),
             Event::Message { id, message } => self.on_message(id, *message),
             Event::Disconnected { id } => {
                 // A peer still here was not dropped by us: the other side
@@ -637,19 +667,20 @@ impl Node {
                     let lasted = handle.connected_at.elapsed().as_secs();
                     log(&closed_by_peer(id, &handle.describe(), lasted));
                 }
+                self.fail_unready(id);
                 self.remove_peer(id);
                 Ok(())
             }
             Event::DialedSelf { id, target } => {
                 self.dialing.remove(&id);
+                self.probes.remove(&id);
                 self.mark_own(target, None);
                 Ok(())
             }
             Event::DialFailed { id, target } => {
                 self.dialing.remove(&id);
-                if let Ok(addr) = target.parse::<SocketAddr>() {
-                    self.book.failed(addr_key(addr));
-                }
+                self.probes.remove(&id);
+                self.fail_target(&target);
                 Ok(())
             }
             Event::Tick => {
@@ -691,6 +722,7 @@ impl Node {
         id: PeerId,
         direction: Direction,
         addr: SocketAddr,
+        local: Option<SocketAddr>,
         target: String,
         outbox: mpsc::Sender<Message>,
     ) -> Result<()> {
@@ -717,6 +749,9 @@ impl Node {
                 outbox,
                 addr,
                 target,
+                local,
+                last_getaddr: None,
+                addr_allowance: 0,
                 connected_at: std::time::Instant::now(),
             },
         );
@@ -724,8 +759,40 @@ impl Node {
         Ok(())
     }
 
+    /// Counts a peer we dialed that is going away before finishing its
+    /// handshake, by closing or by timing out, as a failed attempt. Our own
+    /// reasons for dropping it (a self-dial, a version mismatch, a stalled
+    /// outbox) say nothing about whether the address is reachable.
+    fn fail_unready(&mut self, id: PeerId) {
+        let target = self
+            .peers
+            .get(&id)
+            .filter(|h| !h.peer.is_ready() && h.peer.direction() == Direction::Outbound)
+            .map(|h| h.target.clone());
+        if let Some(target) = target {
+            self.fail_target(&target);
+        }
+    }
+
+    /// Counts a failed attempt against what was dialed, as [`Node::dial`]
+    /// reserved it. Not the socket address, which is the proxy's when one
+    /// is used. Hostnames are not in the book and are skipped.
+    fn fail_target(&mut self, target: &str) {
+        if let Some(key) = dialed_key(target) {
+            self.book.failed(key);
+        }
+    }
+
+    /// Whether outbound peers are reached through the proxy or the SAM
+    /// bridge. Their socket address is then the transport's, so it must
+    /// not be gossiped, banned or announced.
+    fn private_transport(&self) -> bool {
+        self.proxy.is_some() || self.i2p.is_some()
+    }
+
     fn remove_peer(&mut self, id: PeerId) {
         self.peers.remove(&id);
+        self.probes.remove(&id);
         self.handshakes.retain(|_, peer| *peer != id);
         self.dandelion.remove_peer(&id);
         if self.sync_peer == Some(id) {
@@ -774,8 +841,8 @@ impl Node {
         let Some(handle) = self.peers.get(&id) else {
             return;
         };
-        let via_transport = handle.peer.direction() == Direction::Outbound
-            && (self.proxy.is_some() || self.i2p.is_some());
+        let via_transport =
+            handle.peer.direction() == Direction::Outbound && self.private_transport();
         if bannable(handle.addr, via_transport) {
             self.book.ban(addr_key(handle.addr).0, now());
         }
@@ -793,23 +860,28 @@ impl Node {
             handle.target, info.best_height
         ));
         if direction == Direction::Outbound {
-            self.book.connected(addr_key(addr), now());
             // Record the peer we dialed so it can be gossiped onward,
             // unless it was reached through the proxy or the SAM bridge,
-            // where `addr` is the transport's rather than the peer's.
-            if self.proxy.is_none() && self.i2p.is_none() {
+            // where `addr` is the transport's rather than the peer's. It
+            // is shared only in `GetAddr` replies, never pushed as it is
+            // verified: an immediate push would show every peer whom
+            // this node just dialed, the topology Dandelion++ hides.
+            if !self.private_transport() && discovery::allowed(addr, self.network) {
                 let (ip, port) = addr_key(addr);
-                self.book.add(
-                    PeerAddr {
-                        ip,
-                        port,
-                        last_seen: now(),
-                    },
-                    now(),
-                );
+                let address = PeerAddr {
+                    ip,
+                    port,
+                    last_seen: now(),
+                };
+                self.book.add(address, now());
+                self.book.connected((ip, port), now());
             }
-            self.send(id, Message::GetAddr);
         }
+        if self.probes.contains(&id) {
+            self.remove_peer(id);
+            return;
+        }
+        self.exchange_addresses(id);
         let ours = self.chain.tip().map_or(0, |t| t.height);
         if info.best_height > ours {
             self.start_sync(id);
@@ -836,12 +908,9 @@ impl Node {
         }
         match message {
             Message::GetAddr => {
-                let sample = self.book.sample(100, now(), &mut self.rng);
-                self.send(id, Message::Addr(sample));
+                self.share_addresses(id);
             }
-            Message::Addr(addrs) => {
-                self.book.add_many(&addrs, now());
-            }
+            Message::Addr(addrs) => self.on_addr(id, addrs),
             Message::GetHeaders { locator, stop } => self.on_get_headers(id, &locator, stop)?,
             Message::Headers(headers) => self.on_headers(id, &headers),
             Message::Inv(items) => self.on_inv(id, &items)?,
@@ -863,6 +932,77 @@ impl Node {
             | Message::NotFound(_) => {}
         }
         Ok(())
+    }
+
+    /// Records gossiped addresses, up to the peer's remaining allowance
+    /// for this exchange period, so no peer can flood the book.
+    fn on_addr(&mut self, id: PeerId, addrs: Vec<PeerAddr>) {
+        let Some(handle) = self.peers.get_mut(&id) else {
+            return;
+        };
+        let taken = addrs.len().min(handle.addr_allowance);
+        handle.addr_allowance = handle.addr_allowance.saturating_sub(taken);
+        let accepted: Vec<PeerAddr> = addrs
+            .into_iter()
+            .take(taken)
+            .filter(|a| {
+                discovery::allowed(key_addr(a.key()), self.network)
+                    && !self.own.addrs.contains(&a.key())
+            })
+            .collect();
+        self.book.add_many(accepted, now());
+    }
+
+    /// Announces our endpoint to a ready peer and, if we dialed it, asks
+    /// for addresses. Also opens the peer's allowance for the next period.
+    fn exchange_addresses(&mut self, id: PeerId) {
+        let Some(handle) = self.peers.get_mut(&id) else {
+            return;
+        };
+        let local = handle.local;
+        let direction = handle.peer.direction();
+        handle.addr_allowance = discovery::addr_allowance(direction);
+        let listen = (self.max_inbound > 0).then_some(self.listen_addr).flatten();
+        if let Some(addr) = discovery::announcement(
+            listen,
+            self.advertise,
+            local,
+            self.network,
+            self.private_transport(),
+            self.listen_accepts_ipv4,
+        ) {
+            let (ip, port) = addr_key(addr);
+            self.own.addrs.insert((ip, port));
+            self.send(
+                id,
+                Message::Addr(vec![PeerAddr {
+                    ip,
+                    port,
+                    last_seen: now(),
+                }]),
+            );
+        }
+        if direction == Direction::Outbound {
+            self.send(id, Message::GetAddr);
+        }
+    }
+
+    /// Answers `GetAddr` at most once per [`REPLY_SECONDS`] ticks, counted
+    /// like [`EXCHANGE_SECONDS`] so the two periods stay in step.
+    fn share_addresses(&mut self, id: PeerId) {
+        let ticks = self.ticks;
+        let Some(handle) = self.peers.get_mut(&id) else {
+            return;
+        };
+        if handle
+            .last_getaddr
+            .is_some_and(|at| ticks.saturating_sub(at) < REPLY_SECONDS)
+        {
+            return;
+        }
+        handle.last_getaddr = Some(ticks);
+        let sample = self.book.sample(SAMPLE_SIZE, now(), &mut self.rng);
+        self.send(id, Message::Addr(sample));
     }
 
     fn misbehave(&mut self, id: PeerId, points: u32, reason: &'static str) {
@@ -1414,6 +1554,14 @@ impl Node {
         let now = now();
         let ids: Vec<PeerId> = self.peers.keys().copied().collect();
         for id in ids {
+            if self.peers.get(&id).is_some_and(|h| {
+                !h.peer.is_ready()
+                    && h.connected_at.elapsed() >= null_p2p::transport::HANDSHAKE_TIMEOUT
+            }) {
+                self.fail_unready(id);
+                self.remove_peer(id);
+                continue;
+            }
             let nonce = self.rng.next_u64();
             let events = self
                 .peers
@@ -1445,7 +1593,9 @@ impl Node {
             let behind = self
                 .peers
                 .iter()
-                .find(|(_, h)| h.peer.version().is_some_and(|v| v.best_height > ours))
+                .find(|(_, h)| {
+                    h.peer.is_ready() && h.peer.version().is_some_and(|v| v.best_height > ours)
+                })
                 .map(|(id, _)| *id);
             if let Some(id) = behind {
                 self.start_sync(id);
@@ -1454,8 +1604,26 @@ impl Node {
         if self.ticks % 5 == 0 {
             self.maintain_connections();
         }
-        if self.ticks % 600 == 0 {
+        if self.ticks % EXCHANGE_SECONDS == 0 {
+            self.refresh_addresses();
             self.book.prune(now);
+        }
+    }
+
+    fn refresh_addresses(&mut self) {
+        let ids: Vec<_> = self
+            .peers
+            .iter()
+            .filter(|(_, h)| h.peer.is_ready())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(h) = self.peers.get(&id) {
+                if h.peer.direction() == Direction::Outbound && !self.private_transport() {
+                    self.book.connected(addr_key(h.addr), now());
+                }
+            }
+            self.exchange_addresses(id);
         }
     }
 
@@ -1471,6 +1639,9 @@ impl Node {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         self.dialing.insert(id, target.clone());
+        if let Some(key) = dialed_key(&target) {
+            self.book.attempted(key, now());
+        }
         let route = crate::net::Route {
             target,
             proxy: self.proxy,
@@ -1513,7 +1684,7 @@ impl Node {
         if let Some(handle) = self.peers.get(&id) {
             if handle.peer.direction() == Direction::Outbound {
                 let (target, addr) = (handle.target.clone(), handle.addr);
-                let reached_directly = self.proxy.is_none() && self.i2p.is_none();
+                let reached_directly = !self.private_transport();
                 self.mark_own(target, reached_directly.then_some(addr));
             }
         }
@@ -1538,9 +1709,10 @@ impl Node {
             .values()
             .filter(|h| h.peer.direction() == Direction::Outbound)
             .count();
-        if outbound.saturating_add(self.dialing.len()) >= OUTBOUND_TARGET {
-            return;
-        }
+        let full = outbound
+            .saturating_add(self.dialing.len())
+            .saturating_sub(self.probes.len())
+            >= OUTBOUND_TARGET;
         let busy: HashSet<String> = self
             .peers
             .values()
@@ -1550,9 +1722,12 @@ impl Node {
         if let Some(target) = self
             .dialable_configured()
             .into_iter()
-            .find(|t| !busy.contains(t))
+            .find(|t| !full && !busy.contains(t))
         {
             self.dial(target);
+            return;
+        }
+        if full && (self.probes.len() >= MAX_PROBES || self.private_transport()) {
             return;
         }
         let exclude: Vec<([u8; 16], u16)> = self
@@ -1561,10 +1736,21 @@ impl Node {
             .map(|h| addr_key(h.addr))
             .chain(self.own.addrs.iter().copied())
             .chain(self.listen_addr.map(addr_key))
+            .chain(self.advertise.map(addr_key))
+            .chain(self.dialing.values().filter_map(|s| dialed_key(s)))
             .collect();
-        if let Some(candidate) = self.book.candidate(&exclude, now(), &mut self.rng) {
-            let target = key_target(candidate.key());
+        let candidate = if full {
+            self.book
+                .unverified_candidate(&exclude, now(), &mut self.rng)
+        } else {
+            self.book.candidate(&exclude, now(), &mut self.rng)
+        };
+        if let Some(candidate) = candidate {
+            let target = key_addr(candidate.key()).to_string();
             if !busy.contains(&target) {
+                if full {
+                    self.probes.insert(self.next_id);
+                }
                 self.dial(target);
             }
         }
@@ -1727,6 +1913,21 @@ mod tests {
         height: 5,
         branch: BranchId::new(9),
     }];
+
+    #[test]
+    fn dialed_targets_are_keyed_by_what_was_dialed_not_the_proxy() {
+        let peer: SocketAddr = "8.8.8.8:19000".parse().unwrap();
+        assert_eq!(dialed_key(&peer.to_string()), Some(addr_key(peer)));
+        assert_ne!(
+            dialed_key(&peer.to_string()),
+            Some(addr_key("127.0.0.1:9050".parse().unwrap()))
+        );
+        assert_eq!(
+            dialed_key("[2606:4700::1111]:19000").map(key_addr),
+            Some("[2606:4700::1111]:19000".parse().unwrap())
+        );
+        assert_eq!(dialed_key("abcdef.onion:19000"), None);
+    }
 
     #[tokio::test]
     async fn shutdown_releases_owned_listener_ports() {

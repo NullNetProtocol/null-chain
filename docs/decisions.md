@@ -533,8 +533,8 @@ to its book once the handshake completes, unless the peer was reached
 through the proxy or the SAM bridge, where the recorded address is the
 transport's. That makes seed addresses gossipable: a third node given
 only a relay discovers the seed the relay learned, as the discovery test
-shows. Learning inbound peers' listen addresses would need a self-
-advertisement in the handshake and is left for later.
+shows. Learning inbound peers' listen addresses was left for later; the
+2026-10-20 decision below adds this using the existing address messages.
 
 ## 2026-09-10: Control-socket client hardening
 
@@ -1189,3 +1189,38 @@ earlier are refused with the existing "delete the chain directory"
 message and resync the ten blocks from peers; the test network has no
 change and keeps its digest. Nodes that do not upgrade stay on the launch
 limit and fork off at height 11.
+
+## 2026-10-20: Advertise reachable listeners using existing address gossip
+
+Nodes connected only to the five seeds could not discover other nodes
+that also dialed those seeds. Inbound source ports are ephemeral and no
+listening endpoint was announced. Listening nodes now send their own
+endpoint in an ordinary `Addr` after the version handshake. Public bound
+addresses are automatic; wildcard listeners use the connection's local
+interface and the actual bound port. An explicit `advertise` override
+supports NAT mappings and differing external ports. Outbound-only desktop
+wallets continue to discover listeners without accepting inbound sockets.
+
+The existing wire messages were chosen over extending `VersionInfo` or
+adding another message tag: deployed protocol-v1 nodes can still exchange
+messages with upgraded ones. A receiver treats announcements as candidates
+and only relays endpoints after completing an outbound Noise and version
+handshake on the same genesis. Even with eight regular outbound sockets,
+one bounded temporary connection verifies new candidates, then closes.
+Attempts have deadlines and back off; verified entries expire independently
+of gossip timestamps. Address exchange repeats every ten minutes, with reply
+limits. Verified endpoints are pulled through `GetAddr` only: pushing each
+one as it is verified would tell every peer whom this node just dialed,
+the topology Dandelion++ relies on. Shared timestamps are rounded to the
+hour for the same reason. Only outbound peers are asked for address lists;
+inbound peers, which cost an attacker nothing, may announce one address per
+exchange, and re-sent gossip cannot keep a stale entry alive.
+
+Mainnet rejects local and special-use addresses from gossip; explicit
+configured peers can still use them, and testnet permits local addresses.
+Proxy/I2P configurations suppress announcements and reject an explicit
+public endpoint to avoid disclosing a user's IP through those transports.
+UPnP/NAT-PMP, external-IP services, persistent address books and onion/I2P
+address gossip remain future work. Integration tests cover introductions
+through a seed, discovery after an observer has connected, full seeds,
+unverified TCP endpoints, repeated exchange and a forwarded-port override.

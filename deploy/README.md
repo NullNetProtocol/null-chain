@@ -11,10 +11,22 @@
    `crates/node/src/config.rs` for the network, or hand it to users for
    `--seed`.
 
+Listening nodes also become discoverable through existing peers without
+being added to the seed list. Start with `--listen 0.0.0.0:19000`; the
+public interface address and bound port are announced automatically. If
+the host is behind NAT, forward the port and also pass
+`--advertise <PUBLIC_IP>:<EXTERNAL_PORT>`. A peer checks the endpoint with
+a Noise and network-version handshake before sharing it. Even a node
+with eight outbound connections makes one temporary verification
+connection at a time. Upgrade listeners and relays/seeds to use these
+reachability checks and automatic introductions.
+
 ## Over Tor
 
 Install Tor with `torrc.example`, start the node with
 `--proxy 127.0.0.1:9050`, and publish `<onion hostname>:19000`.
+Proxy and I2P operation suppress IP announcements and reject `--advertise`;
+onion and I2P destinations still need explicit peer configuration.
 
 ## Over I2P
 

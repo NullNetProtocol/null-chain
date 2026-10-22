@@ -111,6 +111,7 @@ impl RpcArgs {
 
 /// Commands.
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)] // Parsed once at startup; keep run options together for clap.
 pub enum Command {
     /// Run a node.
     Run {
@@ -127,6 +128,9 @@ pub enum Command {
         /// Address to accept peers on.
         #[arg(long)]
         listen: Option<SocketAddr>,
+        /// Public IP:port to announce, for example a forwarded port behind NAT.
+        #[arg(long, requires = "listen", conflicts_with_all = ["proxy", "i2p"])]
+        advertise: Option<SocketAddr>,
         /// Peers to connect to as `host:port`; repeatable.
         #[arg(long)]
         connect: Vec<String>,
@@ -301,6 +305,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             datadir,
             in_memory,
             listen,
+            advertise,
             connect,
             seed,
             proxy,
@@ -320,6 +325,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 network,
                 datadir: node_datadir(datadir, in_memory, network)?,
                 listen,
+                advertise,
                 connect,
                 seed,
                 proxy,
@@ -441,6 +447,7 @@ struct RunOptions {
     network: Network,
     datadir: Option<PathBuf>,
     listen: Option<SocketAddr>,
+    advertise: Option<SocketAddr>,
     connect: Vec<String>,
     seed: Vec<String>,
     proxy: Option<SocketAddr>,
@@ -459,6 +466,7 @@ async fn run_node(opts: RunOptions) -> Result<()> {
         network,
         datadir,
         listen,
+        advertise,
         connect,
         seed,
         proxy,
@@ -483,6 +491,7 @@ async fn run_node(opts: RunOptions) -> Result<()> {
         network,
         datadir,
         listen,
+        advertise,
         connect: targets,
         proxy,
         i2p,
@@ -856,6 +865,22 @@ mod tests {
         let parsed = Cli::try_parse_from(["nulld", "run", "--in-memory", "--datadir", "x"]);
         assert!(parsed.is_err());
         assert!(Cli::try_parse_from(["nulld", "run", "--in-memory"]).is_ok());
+    }
+
+    #[test]
+    fn advertising_requires_a_listener_and_conflicts_with_private_transports() {
+        let base = ["nulld", "run", "--advertise", "8.8.8.8:19000"];
+        assert!(Cli::try_parse_from(base).is_err());
+        let listener = ["--listen", "0.0.0.0:19000"];
+        assert!(Cli::try_parse_from(base.into_iter().chain(listener)).is_ok());
+        for transport in ["--proxy", "--i2p"] {
+            assert!(Cli::try_parse_from(
+                base.into_iter()
+                    .chain(listener)
+                    .chain([transport, "127.0.0.1:9050"])
+            )
+            .is_err());
+        }
     }
 
     /// The network a parsed command is for, if it takes one.

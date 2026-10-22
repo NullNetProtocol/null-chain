@@ -67,8 +67,20 @@ lock_after_minutes = 15
 mine = false
 mining_threads = 4
 # listen = "127.0.0.1:18445"
+# advertise = "<PUBLIC_IP>:19000"
 # proxy = "127.0.0.1:9050"
 ```
+
+The embedded node discovers reachable listeners through peer address
+exchange. To accept peers, set `listen = "0.0.0.0:19000"` and allow that
+port through the firewall. A public listen/interface address is announced
+automatically. Behind NAT, forward the port and set `advertise` to the
+public IP and external port; the CLI equivalent is `--advertise IP:PORT`.
+The advertised port may differ from the local port. Other nodes verify
+the endpoint before sharing it. Announcements are suppressed with a proxy;
+an explicit `advertise` combined with a proxy is rejected. Mainnet does
+not distribute private or loopback addresses. Outbound-only wallets can
+discover public listeners without configuring either setting.
 
 CLI flags override saved settings for that launch; on the first launch,
 the initial effective settings are written to the new config. `--datadir`

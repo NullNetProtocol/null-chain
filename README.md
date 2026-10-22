@@ -136,6 +136,13 @@ through a router's SAM bridge. The main network dials
 `seed1`–`seed5.nullnet.sh:19000` automatically. The test network has no
 public seeds, so pass `--connect` or `--seed` there.
 
+Peers exchange addresses automatically, including listening nodes that join
+through a seed. Public listeners announce their endpoint; nodes behind port
+forwarding can set `--listen 0.0.0.0:19000 --advertise <PUBLIC_IP>:19000`.
+An endpoint must complete the network handshake before an upgraded node
+shares it. Address exchange repeats every ten minutes. Desktop wallets
+can discover these listeners while remaining outbound-only.
+
 Each node logs with a level and a timestamp — `21:17:47 INFO  mined block 1 …` —
 colored when the output is a terminal (set `NO_COLOR` or pipe it to disable);
 `--log-level debug|info|warn|error` sets the threshold. `--metrics 127.0.0.1:9100` serves

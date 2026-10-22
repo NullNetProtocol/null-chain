@@ -103,6 +103,10 @@ pub struct Config {
     pub datadir: Option<PathBuf>,
     /// Address to accept peers on, or `None` to only dial out.
     pub listen: Option<SocketAddr>,
+    /// Public listening IP and port to announce, for example a NAT mapping.
+    /// Without an override, direct public listen/interface addresses are used.
+    /// Requires a listener and is incompatible with proxy/I2P operation.
+    pub advertise: Option<SocketAddr>,
     /// Peers to dial at startup, as `host:port`; hostnames are resolved,
     /// or handed to the proxy when one is set, so `.onion` names work.
     pub connect: Vec<String>,
@@ -135,12 +139,22 @@ pub struct Config {
 }
 
 impl Config {
+    /// Checks combinations of settings that a front end's own parsing may
+    /// not catch, such as `advertise` from a configuration file.
+    ///
+    /// # Errors
+    /// [`crate::Error::Argument`] describing the conflict.
+    pub fn validate(&self) -> crate::Result<()> {
+        crate::discovery::validate(self)
+    }
+
     /// An in-memory test node with no sockets.
     pub fn test() -> Self {
         Self {
             network: Network::Test,
             datadir: None,
             listen: None,
+            advertise: None,
             connect: Vec::new(),
             proxy: None,
             i2p: None,
