@@ -5,7 +5,7 @@ Anonymity first, performance second, nothing transparent. Ticker `NULL`;
 addresses start with `null1` (`tnull1` on the test network); the node is
 `nulld` and the wallet daemon `null-wallet-rpc`.
 
-Status: mainnet is live (release 0.1.7). Nodes mine, sync and relay
+Status: mainnet is live (release 0.1.8). Nodes mine, sync and relay
 transactions over encrypted connections with Dandelion++, and a command
 line and desktop wallet scan balances and send payments. Every
 transaction is a zero-knowledge proof over a Halo2 circuit; there are no
