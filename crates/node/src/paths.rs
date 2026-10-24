@@ -26,6 +26,8 @@ use crate::{Error, Result};
 /// Open options whose newly created files are readable by the owner only
 /// on Unix, from the moment they exist. Add the access mode to taste.
 pub fn private_open_options() -> OpenOptions {
+    // Only Unix sets a mode; elsewhere the builder is returned unchanged.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
