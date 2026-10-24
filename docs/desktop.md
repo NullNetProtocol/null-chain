@@ -146,6 +146,19 @@ timeout starts again once mining stops. Lock by hand to stop both.
 The sidebar shows the build's release, `v` plus the workspace version
 (`v0.1.6`), under the wallet and network badges on every page.
 
+## Consolidate inputs
+
+On **Send**, choose **Consolidate inputs** to combine small notes, including
+mining rewards, into larger notes at your main (index 0) address. Review the
+input count, transaction count, destination and total network fee, then choose
+**Confirm consolidation**. The quoted inputs are reserved and each batch
+appears in Activity as a self-payment. No recipient address is needed.
+
+Each batch combines up to sixteen inputs. Wait for confirmation before using
+the new notes; for a large wallet, repeat after confirmation to combine them
+further. Existing pending payments keep their reservations. The wallet must
+be unlocked and scanned, and watch-only wallets cannot consolidate.
+
 ## Mining
 
 The Node page has a Mining card with an on/off switch and a thread slider

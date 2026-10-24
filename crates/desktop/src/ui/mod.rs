@@ -148,10 +148,18 @@ impl App {
                     .map_err(Clone::clone),
             );
         }
+        if route == Some(Reply::ConsolidationQuote) {
+            self.screens.send.consolidation_quoted(
+                result
+                    .as_ref()
+                    .map(|o| o.value.clone())
+                    .map_err(Clone::clone),
+            );
+        }
         self.message = match (route, result) {
             (_, Err(error)) => error,
             (Some(Reply::Notice(notice)), Ok(_)) => notice.into(),
-            (Some(Reply::Quote), Ok(_)) => String::new(),
+            (Some(Reply::Quote | Reply::ConsolidationQuote), Ok(_)) => String::new(),
             (None, Ok(outcome)) => {
                 if let Some(phrase) = outcome.phrase {
                     let words = phrase.split_whitespace().count();

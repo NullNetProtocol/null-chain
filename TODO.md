@@ -133,6 +133,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Encrypted spending key at rest: Argon2id passphrase derivation, ChaCha20-Poly1305, `nulld create`
 - [x] Note records encrypted under the file key; the witness tree and heights stay in the clear as public chain data
 - [x] CLI: `nulld keygen`, `address`, `balance`, `send` over the control socket
+- [x] Main-address consolidation: `quoteconsolidation`/`consolidate` RPC, `nulld consolidate` with a dry-run preview, and Send-page review/confirmation; disjoint batches of up to sixteen notes, exact input reservations, total fee cap, and persisted self-payments (2026-10-24)
 
 ## Phase 7: Node (`crates/node`)
 

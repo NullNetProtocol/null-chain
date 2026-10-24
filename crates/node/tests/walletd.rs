@@ -66,6 +66,128 @@ async fn wait_for(deadline: Duration, mut check: impl AsyncFnMut() -> bool) {
     }
 }
 
+async fn call_when_idle(addr: SocketAddr, token: &str, method: &str, params: Value) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let body = json!({ "jsonrpc": "2.0", "method": method, "params": params, "id": 1 });
+        let reply = post(addr, token, &body.to_string()).await;
+        if reply["error"].is_null() {
+            return reply["result"].clone();
+        }
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("wallet is busy"),
+            "{reply}"
+        );
+        assert!(Instant::now() < deadline, "{reply}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn consolidate_three_notes(addr: SocketAddr, token: &str, address: &str) {
+    let notes = call(addr, token, "listunspent", json!([])).await;
+    let mut notes = notes.as_array().unwrap().clone();
+    notes.sort_by_key(|note| note["amount"].as_str().unwrap().parse::<u64>().unwrap());
+    assert_eq!(
+        notes[0]["amount"], "500",
+        "include the tiny diversified-address note to exercise exact selection"
+    );
+    let inputs: Vec<_> = notes
+        .iter()
+        .take(3)
+        .map(|n| n["position"].clone())
+        .collect();
+    assert_eq!(inputs.len(), 3);
+    let quote = call_when_idle(
+        addr,
+        token,
+        "quoteconsolidation",
+        json!({ "inputs": inputs }),
+    )
+    .await;
+    assert_eq!(quote["input_count"], 3);
+    assert_eq!(quote["transactions"], 1);
+    assert_eq!(quote["fee"], "40000");
+    assert_eq!(quote["address"], address);
+    let refused = json!({ "inputs": inputs, "max_fee": "1" });
+    // A rejected fee limit must not queue anything.
+    let before = call(addr, token, "listoperations", json!([])).await;
+    let body = json!({ "jsonrpc": "2.0", "method": "consolidate", "params": refused, "id": 1 });
+    assert_eq!(
+        post(addr, token, &body.to_string()).await["error"]["code"],
+        REJECTED
+    );
+    assert_eq!(call(addr, token, "listoperations", json!([])).await, before);
+    let queued = call_when_idle(
+        addr,
+        token,
+        "consolidate",
+        json!({ "inputs": inputs, "max_fee": quote["fee"] }),
+    )
+    .await;
+    let id = queued["operation_ids"][0].clone();
+    assert_eq!(
+        call_err(addr, token, "consolidate", json!({ "inputs": inputs })).await,
+        REJECTED
+    );
+    assert_eq!(
+        call(addr, token, "listoperations", json!([]))
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        before.as_array().unwrap().len() + 1,
+        "a second request cannot queue the same inputs"
+    );
+    wait_for(Duration::from_secs(180), async || {
+        let status = call(addr, token, "getoperationstatus", json!([id])).await;
+        assert!(status["error"].is_null(), "{status}");
+        status["status"] == "confirmed"
+    })
+    .await;
+    let status = call(addr, token, "getoperationstatus", json!([id])).await;
+    let view = call(addr, token, "gettransaction", json!([status["txid"]])).await;
+    assert_eq!(view["spent"].as_array().unwrap().len(), 3);
+    assert_eq!(view["received"].as_array().unwrap().len(), 1);
+    assert_eq!(view["received"][0]["address"], address);
+    assert_eq!(view["received"][0]["amount"], quote["amount"]);
+    assert_eq!(view["net"], "-40000");
+}
+
+async fn preview_with_cli(path: &std::path::Path, node: SocketAddr, expected_operations: usize) {
+    let wallet_path = path.to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_nulld"))
+            .arg("consolidate")
+            .arg("--wallet")
+            .arg(wallet_path)
+            .arg("--rpc")
+            .arg(node.to_string())
+            .args(["--rpc-token", "node", "--dry-run", "--light"])
+            .env("NULL_WALLET_PASSPHRASE", "pw")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let quote: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(quote["input_count"].as_u64().unwrap() >= 2);
+    assert!(quote["transactions"].as_u64().unwrap() >= 1);
+    let wallet = Wallet::open(path, genesis(&Network::Test.params()).hash(), b"pw").unwrap();
+    assert_eq!(
+        wallet.operations().unwrap().len(),
+        expected_operations,
+        "a CLI preview queues nothing"
+    );
+}
+
 // One node, one daemon and one proving key serve every assertion, and
 // the steps build on each other's chain state.
 #[allow(clippy::too_many_lines)]
@@ -272,6 +394,13 @@ async fn the_wallet_daemon_serves_an_exchange() {
         null_node::jsonrpc::INVALID_PARAMS
     );
 
+    consolidate_three_notes(
+        addr,
+        t,
+        &miner_keys.default_address().unwrap().encode(prefix),
+    )
+    .await;
+
     // The sender proves the withdrawal to anyone through a disclosure the
     // node verifies; a tampered one proves nothing.
     let disclosures = call(addr, t, "getpaymentdisclosure", json!([txid])).await;
@@ -349,7 +478,14 @@ async fn the_wallet_daemon_serves_an_exchange() {
     let exported = call(addr, t, "exportviewingkey", json!([])).await;
     let fvk = decode_full_viewing_key(exported["viewing_key"].as_str().unwrap(), prefix).unwrap();
     assert_eq!(fvk.to_bytes(), miner_keys.full_viewing_key().to_bytes());
-    daemon.shutdown();
+    let operations = call(addr, t, "listoperations", json!([])).await;
+    daemon.shutdown_and_wait().await;
+    preview_with_cli(
+        &path,
+        node.rpc_addr.unwrap(),
+        operations.as_array().unwrap().len(),
+    )
+    .await;
     let watch_path = dir.path().join("watch.redb");
     drop(Wallet::create_watch_only(&watch_path, fvk, genesis_hash, b"pw", &mut rng).unwrap());
     let watch = Wallet::open(&watch_path, genesis_hash, b"pw").unwrap();
@@ -375,6 +511,10 @@ async fn the_wallet_daemon_serves_an_exchange() {
     .await;
     let info = call(watcher.addr, w, "getwalletinfo", json!([])).await;
     assert_eq!(info["watch_only"], true);
+    assert_eq!(
+        call_err(watcher.addr, w, "consolidate", json!([])).await,
+        REJECTED
+    );
     assert!(
         info["notes"].as_u64() >= before.as_u64(),
         "sees every note the full wallet saw, plus any mined since"

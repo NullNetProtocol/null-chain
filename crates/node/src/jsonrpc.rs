@@ -159,6 +159,7 @@ impl From<null_wallet::Error> for RpcError {
         match error {
             null_wallet::Error::NoOperation(_) => Self::not_found("operation"),
             null_wallet::Error::InsufficientFunds { .. }
+            | null_wallet::Error::Consolidation(_)
             | null_wallet::Error::WatchOnly
             | null_wallet::Error::TooManyRecipients(_) => Self::new(REJECTED, error.to_string()),
             null_wallet::Error::Protocol(_) | null_wallet::Error::Crypto(_) => {

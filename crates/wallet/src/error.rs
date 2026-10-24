@@ -28,6 +28,9 @@ pub enum Error {
     /// More recipients than a transaction can carry.
     #[error("too many recipients: at most {0}")]
     TooManyRecipients(usize),
+    /// A consolidation has no useful inputs, or its reviewed inputs changed.
+    #[error("cannot consolidate: {0}")]
+    Consolidation(&'static str),
     /// The operating system's random source failed.
     #[error("system randomness unavailable")]
     Entropy,

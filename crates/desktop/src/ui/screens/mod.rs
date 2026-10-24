@@ -58,6 +58,8 @@ pub enum Reply {
     Notice(&'static str),
     /// Hand the result or error to the send form as a fee quote.
     Quote,
+    /// Hand the consolidation quote to the send screen for review.
+    ConsolidationQuote,
 }
 
 impl From<Call> for Action {

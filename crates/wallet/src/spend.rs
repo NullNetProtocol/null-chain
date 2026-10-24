@@ -82,6 +82,109 @@ pub struct Quote {
     pub actions: usize,
 }
 
+/// One consolidation transaction: spend exactly these notes into one main-address output.
+#[derive(Clone, Debug)]
+pub struct Consolidation {
+    /// Positions reserved for this transaction.
+    pub positions: Vec<u64>,
+    /// The self-payment, after the protocol fee.
+    pub payment: Payment,
+    /// Fee for the padded action class.
+    pub fee: Amount,
+}
+
+/// Plans disjoint batches of at most sixteen eligible notes, returning each
+/// batch to the wallet's default address. Single notes and batches whose
+/// value cannot cover their fee are left alone. `positions`, when supplied,
+/// must all still be eligible; this lets callers submit a reviewed quote.
+///
+/// # Errors
+/// Fails on a wallet error, duplicate/unavailable positions, or no useful batch.
+pub fn plan_consolidation(
+    wallet: &Wallet,
+    excluded: &[u64],
+    max_note_height: u32,
+    positions: Option<&[u64]>,
+) -> Result<Vec<Consolidation>> {
+    let notes = wallet.unspent()?;
+    consolidation_from(
+        &notes,
+        wallet.keys().default_address()?,
+        excluded,
+        max_note_height,
+        positions,
+    )
+}
+
+fn consolidation_from(
+    notes: &[OwnedNote],
+    address: Address,
+    excluded: &[u64],
+    max_note_height: u32,
+    positions: Option<&[u64]>,
+) -> Result<Vec<Consolidation>> {
+    let excluded: std::collections::HashSet<_> = excluded.iter().copied().collect();
+    let wanted = positions.map(|positions| {
+        positions
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+    });
+    let mut eligible: Vec<_> = notes
+        .iter()
+        .filter(|n| {
+            n.height <= max_note_height
+                && !excluded.contains(&n.position)
+                && n.note.value().raw() > 0
+                && wanted
+                    .as_ref()
+                    .is_none_or(|wanted| wanted.contains(&n.position))
+        })
+        .collect();
+    if let Some(wanted) = positions {
+        if eligible.len() != wanted.len() {
+            return Err(Error::Consolidation(
+                "inputs changed or are unavailable; request a new quote",
+            ));
+        }
+    }
+    eligible.sort_by_key(|n| (core::cmp::Reverse(n.note.value().raw()), n.position));
+    let mut batches = Vec::new();
+    for notes in eligible
+        .chunks(MAX_ACTIONS)
+        .filter(|notes| notes.len() >= 2)
+    {
+        let value = notes
+            .iter()
+            .try_fold(Amount::ZERO, |sum, n| sum.checked_add(n.note.value()))?;
+        let fee = fee_for_actions(action_class(notes.len(), 1)?)?;
+        if value.raw() <= fee.raw() {
+            continue;
+        }
+        batches.push(Consolidation {
+            positions: notes.iter().map(|n| n.position).collect(),
+            payment: Payment {
+                recipient: address,
+                amount: Amount::from_raw(value.raw().saturating_sub(fee.raw()))?,
+                memo: Memo::empty(),
+            },
+            fee,
+        });
+    }
+    if batches.is_empty() {
+        return Err(Error::Consolidation(
+            "need at least two available notes whose value covers the fee",
+        ));
+    }
+    // An explicit quote must be reproduced exactly, including its input count.
+    if positions.is_some_and(|wanted| {
+        batches.iter().map(|b| b.positions.len()).sum::<usize>() != wanted.len()
+    }) {
+        return Err(Error::Consolidation("inputs changed; request a new quote"));
+    }
+    Ok(batches)
+}
+
 /// The notes `payments` would spend from `unspent`, skipping `excluded`
 /// positions and notes above `max_note_height`, with the fee. Change adds
 /// one output. [`build_payments`] and [`quote_payments`] both use this, so
@@ -192,10 +295,69 @@ pub fn build_payments(
     max_note_height: u32,
     rng: &mut (impl RngCore + CryptoRng),
 ) -> Result<Built> {
+    let unspent = spendable_notes(wallet)?;
+    let (chosen, fee) = plan(&unspent, payments, excluded, max_note_height)?;
+    build_selected(wallet, payments, &chosen, fee, pk, branch, rng)
+}
+
+/// Builds from every reserved input, without greedy selection dropping small
+/// notes at a fee-tier boundary. Used for previously reviewed consolidation batches.
+///
+/// # Errors
+/// Fails if an input is no longer available/confirmed, or on a building error.
+pub fn build_reserved_payments(
+    wallet: &Wallet,
+    payments: &[Payment],
+    positions: &[u64],
+    pk: &ProvingKey,
+    branch: BranchId,
+    max_note_height: u32,
+    rng: &mut (impl RngCore + CryptoRng),
+) -> Result<Built> {
+    let unspent = spendable_notes(wallet)?;
+    let chosen = reserved_notes(&unspent, positions, max_note_height)?;
+    let fee = fee_for_actions(action_class(
+        chosen.len(),
+        payments.len().saturating_add(1),
+    )?)?;
+    build_selected(wallet, payments, &chosen, fee, pk, branch, rng)
+}
+
+// Reject watch-only wallets before selection, even when they lack funds.
+fn spendable_notes(wallet: &Wallet) -> Result<Vec<OwnedNote>> {
+    wallet.keys().spending_key()?;
+    wallet.unspent()
+}
+
+fn reserved_notes<'a>(
+    notes: &'a [OwnedNote],
+    positions: &[u64],
+    max_height: u32,
+) -> Result<Vec<&'a OwnedNote>> {
+    let unique: std::collections::HashSet<_> = positions.iter().copied().collect();
+    let chosen: Vec<_> = notes
+        .iter()
+        .filter(|n| unique.contains(&n.position) && n.height <= max_height)
+        .collect();
+    if chosen.len() != positions.len() || unique.len() != positions.len() || chosen.is_empty() {
+        return Err(Error::Consolidation(
+            "reserved inputs are no longer available",
+        ));
+    }
+    Ok(chosen)
+}
+
+fn build_selected(
+    wallet: &Wallet,
+    payments: &[Payment],
+    chosen: &[&OwnedNote],
+    fee: Amount,
+    pk: &ProvingKey,
+    branch: BranchId,
+    rng: &mut (impl RngCore + CryptoRng),
+) -> Result<Built> {
     let keys = wallet.keys();
     let sk = keys.spending_key()?;
-    let unspent = wallet.unspent()?;
-    let (chosen, fee) = plan(&unspent, payments, excluded, max_note_height)?;
     let amount = total(payments)?;
     let positions: Vec<u64> = chosen.iter().map(|n| n.position).collect();
     let (paths, anchor) = wallet.witnesses(&positions)?;
@@ -301,6 +463,95 @@ mod tests {
             amount: Amount::from_raw(amount).unwrap(),
             memo: Memo::empty(),
         }
+    }
+
+    #[test]
+    fn consolidation_batches_are_bounded_disjoint_and_pay_the_main_address() {
+        let mut rng = ChaCha20Rng::seed_from_u64(51);
+        let keys = WalletKeys::from_spending_key(SpendingKey::random(&mut rng)).unwrap();
+        let notes: Vec<_> = (0..35)
+            .map(|i| owned(&mut rng, &keys, 1_000_000, i))
+            .collect();
+        let address = keys.default_address().unwrap();
+        let batches = consolidation_from(&notes, address, &[], 1, None).unwrap();
+        assert_eq!(
+            batches
+                .iter()
+                .map(|b| b.positions.len())
+                .collect::<Vec<_>>(),
+            [16, 16, 3]
+        );
+        let positions: Vec<_> = batches
+            .iter()
+            .flat_map(|b| b.positions.iter().copied())
+            .collect();
+        assert_eq!(
+            positions.len(),
+            positions
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+        for batch in &batches {
+            assert_eq!(batch.payment.recipient, address);
+            assert_eq!(
+                batch.payment.amount.raw() + batch.fee.raw(),
+                batch.positions.len() as u64 * 1_000_000
+            );
+        }
+        let again = consolidation_from(&notes, address, &[], 1, Some(&positions)).unwrap();
+        assert_eq!(
+            again.iter().map(|b| &b.positions).collect::<Vec<_>>(),
+            batches.iter().map(|b| &b.positions).collect::<Vec<_>>()
+        );
+        let seventeen = consolidation_from(&notes[..17], address, &[], 1, None).unwrap();
+        assert_eq!(
+            seventeen.len(),
+            1,
+            "a trailing single note needs no self-payment"
+        );
+    }
+
+    #[test]
+    fn consolidation_rejects_stale_duplicates_and_uneconomic_inputs() {
+        let mut rng = ChaCha20Rng::seed_from_u64(52);
+        let keys = WalletKeys::from_spending_key(SpendingKey::random(&mut rng)).unwrap();
+        let mut notes: Vec<_> = (0..3)
+            .map(|i| owned(&mut rng, &keys, 1_000_000, i))
+            .collect();
+        notes[2].height = 10;
+        let address = keys.default_address().unwrap();
+        assert!(consolidation_from(&notes, address, &[], 1, Some(&[0, 2])).is_err());
+        assert!(consolidation_from(&notes, address, &[1], 1, Some(&[0, 1])).is_err());
+        assert!(consolidation_from(&notes, address, &[], 1, Some(&[0, 0])).is_err());
+        assert!(consolidation_from(&notes, address, &[], 1, Some(&[])).is_err());
+        let tiny: Vec<_> = (0..2).map(|i| owned(&mut rng, &keys, 1, i)).collect();
+        assert!(consolidation_from(&tiny, address, &[], 1, None).is_err());
+        assert_eq!(
+            consolidation_from(&notes, address, &[], 1, None).unwrap()[0].positions,
+            [0, 1]
+        );
+    }
+
+    #[test]
+    fn reserved_selection_keeps_small_inputs_at_fee_tier_boundaries() {
+        let mut rng = ChaCha20Rng::seed_from_u64(53);
+        let keys = WalletKeys::from_spending_key(SpendingKey::random(&mut rng)).unwrap();
+        let notes = [
+            owned(&mut rng, &keys, 1_000_000, 0),
+            owned(&mut rng, &keys, 1_000_000, 1),
+            owned(&mut rng, &keys, 1, 2),
+        ];
+        let batch = consolidation_from(&notes, keys.default_address().unwrap(), &[], 1, None)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let reserved = reserved_notes(&notes, &batch.positions, 1).unwrap();
+        assert_eq!(reserved.len(), 3);
+        assert_eq!(batch.fee.raw(), 4 * FEE_PER_ACTION);
+        assert!(reserved_notes(&notes, &[0, 9], 1).is_err());
+        assert!(reserved_notes(&notes, &[0, 0], 1).is_err());
+        assert!(reserved_notes(&notes, &[0, 1], 0).is_err());
     }
 
     #[test]

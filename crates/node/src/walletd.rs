@@ -30,7 +30,10 @@ use null_protocol::transaction::{Transaction, TxId};
 use null_protocol::viewing_key::encode_full_viewing_key;
 use null_wallet::operations::{Operation, OperationStatus};
 use null_wallet::scan::OwnedNote;
-use null_wallet::spend::{build_payments, quote_payments, Built, Payment, MAX_RECIPIENTS};
+use null_wallet::spend::{
+    build_payments, build_reserved_payments, plan_consolidation, quote_payments, Built,
+    Consolidation, Payment, MAX_RECIPIENTS,
+};
 use null_wallet::wallet::Wallet;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -74,6 +77,8 @@ pub const METHODS: &[&str] = &[
     "canceloperation",
     "estimatefee",
     "quotepayment",
+    "quoteconsolidation",
+    "consolidate",
     "rescan",
     "getpaymentdisclosure",
     "answerchallenge",
@@ -354,7 +359,7 @@ pub async fn run(config: Config) -> Result<Handle> {
 }
 
 impl WalletDaemon {
-    fn new(config: ServiceConfig) -> Self {
+    pub(crate) fn new(config: ServiceConfig) -> Self {
         Self(Arc::new(Inner {
             wallet: config.wallet,
             network: config.network,
@@ -395,17 +400,11 @@ impl WalletDaemon {
     }
 
     /// One sync from the node, then one pass over the operations.
-    async fn sync_once(&self) -> Result<()> {
+    pub(crate) async fn sync_once(&self) -> Result<()> {
         let _guard = self.0.sync_lock.lock().await;
         self.recover_interrupted_operations()?;
         let mut client = self.0.node.connect().await?;
-        let maturity = self.0.params.coinbase_maturity;
-        let tip = sync_wallet(&mut client, &self.0.wallet, self.0.light, maturity).await?;
-        *self
-            .0
-            .node_height
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tip);
+        let tip = self.scan(&mut client).await?;
         // Restore reservations for every removed confirmation before a queued
         // payment can select notes, including stale records from older writers.
         self.reconcile_operations(&mut client, tip).await?;
@@ -421,6 +420,25 @@ impl WalletDaemon {
             }
         }
         Ok(())
+    }
+
+    /// Scans for the CLI preview without building or broadcasting any operations.
+    pub(crate) async fn scan_once(&self) -> Result<()> {
+        let _guard = self.0.sync_lock.lock().await;
+        let mut client = self.0.node.connect().await?;
+        self.scan(&mut client).await?;
+        Ok(())
+    }
+
+    async fn scan(&self, client: &mut impl Control) -> Result<u32> {
+        let maturity = self.0.params.coinbase_maturity;
+        let tip = sync_wallet(client, &self.0.wallet, self.0.light, maturity).await?;
+        *self
+            .0
+            .node_height
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tip);
+        Ok(tip)
     }
 
     fn recover_interrupted_operations(&self) -> Result<()> {
@@ -557,10 +575,34 @@ impl WalletDaemon {
             .saturating_add(1)
             .saturating_sub(op.min_confirmations.max(1));
         let excluded = self.excluded_positions(&op)?;
+        if op.transaction.is_none() && op.locked.iter().any(|position| excluded.contains(position))
+        {
+            return self.build_failed(
+                &op,
+                tip,
+                "reserved consolidation inputs are no longer available".into(),
+            );
+        }
         let pk = self.proving_key().await?;
         let daemon = self.clone();
         let recipients = op.recipients.clone();
+        let reserved = op
+            .transaction
+            .is_none()
+            .then(|| op.locked.clone())
+            .filter(|positions| !positions.is_empty());
         let built = tokio::task::spawn_blocking(move || {
+            if let Some(positions) = reserved {
+                return build_reserved_payments(
+                    &daemon.0.wallet,
+                    &recipients,
+                    &positions,
+                    pk.as_ref(),
+                    branch,
+                    max_note_height,
+                    &mut rand::rngs::OsRng,
+                );
+            }
             build_payments(
                 &daemon.0.wallet,
                 &recipients,
@@ -600,6 +642,15 @@ impl WalletDaemon {
         // Every replacement must conflict with every retained attempt, including
         // after a reorg changes note positions or selects an older confirmation.
         excluded.extend(self.0.wallet.unspent()?.iter().filter_map(|note| {
+            // Consolidation reserves an exact batch before its first build.
+            // Preserve that selection, including after restart or cancellation
+            // of a neighbouring batch, rather than choosing a larger note.
+            if op.transaction.is_none()
+                && !op.locked.is_empty()
+                && !op.locked.contains(&note.position)
+            {
+                return Some(note.position);
+            }
             attempts
                 .iter()
                 .any(|tx| {
@@ -837,6 +888,8 @@ fn parse_amount(value: Option<&Value>) -> core::result::Result<Amount, RpcError>
 impl Dispatch for WalletDaemon {
     async fn call(&self, method: &str, params: &Params) -> core::result::Result<Value, RpcError> {
         match method {
+            "quoteconsolidation" => self.consolidation(params, false),
+            "consolidate" => self.consolidation(params, true),
             "getwalletinfo" | "getnewaddress" | "listaddresses" | "getaddressinfo"
             | "validateaddress" | "exportviewingkey" | "estimatefee" | "help" => {
                 self.wallet_methods(method, params)
@@ -1095,6 +1148,90 @@ impl WalletDaemon {
             return Err(RpcError::not_found("output sent by this wallet"));
         }
         Ok(Value::Array(out))
+    }
+
+    /// Quotes or atomically queues disjoint self-payments. This shares the
+    /// worker's lock so no prover can select the same inputs mid-reservation.
+    fn consolidation(
+        &self,
+        params: &Params,
+        submit: bool,
+    ) -> core::result::Result<Value, RpcError> {
+        let _guard = self.0.sync_lock.try_lock().map_err(|_| {
+            RpcError::new(REJECTED, "wallet is busy; try consolidation again shortly")
+        })?;
+        if self.0.wallet.keys().is_watch_only() && submit {
+            return Err(RpcError::new(REJECTED, "watch-only wallet cannot spend"));
+        }
+        let tip = self
+            .scanned_height()?
+            .filter(|height| Some(*height) == self.node_height())
+            .ok_or_else(|| RpcError::new(REJECTED, "wait for the wallet to finish scanning"))?;
+        let min: u32 = params.opt(0, "min_confirmations")?.unwrap_or(1);
+        let positions: Option<Vec<u64>> = params.opt(1, "inputs")?;
+        let max_height = tip
+            .checked_add(1)
+            .and_then(|height| height.checked_sub(min.max(1)))
+            .ok_or_else(|| RpcError::new(REJECTED, "not enough confirmations for consolidation"))?;
+        let batches = plan_consolidation(
+            &self.0.wallet,
+            &self.pending_locks(None)?,
+            max_height,
+            positions.as_deref(),
+        )?;
+        let mut quote = self.consolidation_json(&batches)?;
+        if let Some(limit) = params.opt::<Value>(2, "max_fee")? {
+            let limit = parse_amount(Some(&limit))?;
+            let fee = batches
+                .iter()
+                .try_fold(Amount::ZERO, |sum, batch| sum.checked_add(batch.fee))?;
+            if fee.raw() > limit.raw() {
+                return Err(RpcError::new(
+                    REJECTED,
+                    "consolidation fee exceeds max_fee; request a new quote",
+                ));
+            }
+        }
+        if submit {
+            let payments = batches
+                .into_iter()
+                .map(|batch| (vec![batch.payment], batch.positions))
+                .collect();
+            let operations = self
+                .0
+                .wallet
+                .add_reserved_operations(payments, min, now())?;
+            if let Some(object) = quote.as_object_mut() {
+                object.insert(
+                    "operation_ids".into(),
+                    json!(operations.iter().map(|op| op.id).collect::<Vec<_>>()),
+                );
+                object.insert("status".into(), json!("queued"));
+            }
+            self.0.wake.notify_one();
+        }
+        Ok(quote)
+    }
+
+    fn consolidation_json(
+        &self,
+        batches: &[Consolidation],
+    ) -> core::result::Result<Value, RpcError> {
+        let fee = batches
+            .iter()
+            .try_fold(Amount::ZERO, |sum, batch| sum.checked_add(batch.fee))?;
+        let amount = batches.iter().try_fold(Amount::ZERO, |sum, batch| {
+            sum.checked_add(batch.payment.amount)
+        })?;
+        let inputs: Vec<_> = batches
+            .iter()
+            .flat_map(|batch| batch.positions.iter().copied())
+            .collect();
+        Ok(json!({
+            "address": self.0.wallet.keys().default_address()?.encode(self.0.params.address_prefix),
+            "input_count": inputs.len(), "inputs": inputs,
+            "transactions": batches.len(), "fee": fee.raw().to_string(), "amount": amount.raw().to_string(),
+        }))
     }
 
     /// Unspent value split by what a send may use now.
@@ -1730,5 +1867,41 @@ mod tests {
             .note_methods("getoperationstatus", &Params::new(json!([fresh.id])))
             .unwrap();
         assert_eq!(listed["cancellable"], true);
+    }
+
+    #[tokio::test]
+    async fn consolidation_checks_sync_confirmations_and_the_worker_lock_without_queuing() {
+        let (_dir, wallet) = wallet_file();
+        let daemon = offline_daemon(wallet);
+        let empty = Params::new(json!([]));
+        let error = daemon.call("quoteconsolidation", &empty).await.unwrap_err();
+        assert!(error.message.contains("finish scanning"));
+        daemon
+            .wallet()
+            .scan(
+                &genesis(&Network::Test.params()),
+                Network::Test.params().coinbase_maturity,
+                None,
+            )
+            .unwrap();
+        *daemon.0.node_height.lock().unwrap() = Some(0);
+        let error = daemon
+            .call(
+                "quoteconsolidation",
+                &Params::new(json!({ "min_confirmations": 2 })),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("not enough confirmations"));
+        let guard = daemon.0.sync_lock.lock().await;
+        let error = daemon.call("consolidate", &empty).await.unwrap_err();
+        assert!(error.message.contains("wallet is busy"));
+        drop(guard);
+        let error = daemon
+            .call("consolidate", &Params::new(json!({ "inputs": [u64::MAX] })))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("inputs changed"));
+        assert_eq!(daemon.wallet().operations().unwrap().len(), 0);
     }
 }

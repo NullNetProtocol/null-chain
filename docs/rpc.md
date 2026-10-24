@@ -286,6 +286,35 @@ threshold; the network refuses reorganizations deeper than 200.
 | `canceloperation` | `operation_id` | the operation, now `cancelled`; only a `queued` operation with no recorded transaction can be cancelled, since an earlier broadcast may still be mined. Operations report this as `cancellable` |
 | `estimatefee` | `recipients` = 1 | `{fee, actions}` for that many recipients plus change; a lower bound, since spending many small notes can need a larger class |
 | `quotepayment` | `recipients`, `min_confirmations` = 1 | `{fee, total, spends, actions}` for exactly these recipients, selecting notes as `sendmany` would now; `REJECTED` with the shortfall on insufficient funds. Exact for the wallet's current notes; a queued payment builds later and may select differently |
+| `quoteconsolidation` | `min_confirmations` = 1, `inputs` (optional array of note positions) | `{address, input_count, inputs, transactions, fee, amount}`: a preview of consolidation into the main (index 0) address; amounts and fees are strings in smallest units |
+| `consolidate` | same as `quoteconsolidation`, `max_fee` (optional, smallest units) | the quote plus `{operation_ids, status: "queued"}`; one persisted operation per batch, all reserved atomically |
+
+Consolidation combines available notes from any wallet address into batches
+of 2–16 inputs, each producing one note at the main address after its fee.
+Inputs reserved by other operations, unconfirmed inputs, zero-value notes,
+and batches that cannot cover their fee are excluded. A trailing single note
+is left alone. Pass the quote's `inputs` and `fee` as `inputs` and `max_fee`
+when confirming; unavailable or duplicate inputs and excessive fees are
+rejected before any operation is queued. Requests during an active scan or
+proof return `REJECTED` with a busy message; retry shortly. Watch-only wallets
+can preview but cannot consolidate. Track or cancel each operation through
+the existing operation methods. After confirmation, another consolidation
+can combine the resulting notes further; it never spends future rewards
+automatically.
+
+The CLI uses the same planner and persisted worker against a node's control
+socket. Close another application holding that wallet file first:
+
+```sh
+nulld consolidate --wallet miner.wallet --rpc-token-file /path/to/rpc.token --dry-run
+nulld consolidate --wallet miner.wallet --rpc-token-file /path/to/rpc.token
+```
+
+`--min-confirmations N` filters inputs and `--light` scans compact blocks.
+The preview scans only; it does not queue or broadcast transactions. The
+execution prints operation ids, builds and records the transactions for
+broadcast, and exits without waiting for mining. A wallet daemon or a later
+execution resumes outstanding operations; `nulld balance` scans confirmations.
 
 The sync loop builds and proves queued operations one at a time on the
 blocking pool; reads keep being served meanwhile. Interrupted builds

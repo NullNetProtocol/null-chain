@@ -23,6 +23,7 @@ use null_wallet::spend::{build_payment, Payment};
 use null_wallet::wallet::Wallet;
 
 use crate::config::{Config, Network};
+use crate::jsonrpc::{Dispatch, Params};
 use crate::paths;
 use crate::rpc::{Client, Control, Endpoint, Token, TOKEN_FILE};
 use crate::shutdown::Shutdown;
@@ -280,6 +281,24 @@ pub enum Command {
         #[arg(long)]
         light: bool,
     },
+    /// Merge available notes into larger notes at the main address.
+    Consolidate {
+        /// The wallet (close the desktop or wallet daemon before opening its file).
+        #[command(flatten)]
+        wallet: WalletArgs,
+        /// The node control socket and authentication.
+        #[command(flatten)]
+        rpc: RpcArgs,
+        /// Scan compact blocks instead of full ones.
+        #[arg(long)]
+        light: bool,
+        /// Only show input count, transaction count, destination, and total fee.
+        #[arg(long)]
+        dry_run: bool,
+        /// Minimum input confirmations.
+        #[arg(long, default_value_t = 1)]
+        min_confirmations: u32,
+    },
     /// Serve a faucet: `GET /pay/<address>` sends a fixed amount.
     Faucet {
         /// The wallet paying out.
@@ -368,23 +387,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             out,
         } => genesis_coinbase(network, &address, &out).await,
         Command::Address { wallet, network } => show_address(&wallet, network),
-        Command::Balance { wallet, rpc, light } => {
-            let mut client = rpc.connect().await?;
-            let genesis = fetch_genesis(&mut client).await?;
-            let maturity = network_of(&genesis)?.params().coinbase_maturity;
-            let wallet = open_wallet(&wallet, genesis)?;
-            let scanned = sync_wallet(&mut client, &wallet, light, maturity).await?;
-            for note in wallet.unspent()? {
-                println!(
-                    "note at height {} position {}: {}",
-                    note.height,
-                    note.position,
-                    note.note.value().raw()
-                );
-            }
-            println!("scanned to height {scanned}, balance {}", wallet.balance()?);
-            Ok(())
-        }
+        Command::Balance { wallet, rpc, light } => balance(&wallet, &rpc, light).await,
         Command::Send {
             wallet,
             to,
@@ -392,6 +395,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             rpc,
             light,
         } => send(&wallet, &to, amount, &rpc, light).await,
+        Command::Consolidate {
+            wallet,
+            rpc,
+            light,
+            dry_run,
+            min_confirmations,
+        } => consolidate(&wallet, &rpc, light, dry_run, min_confirmations).await,
         Command::Faucet {
             wallet,
             rpc,
@@ -399,6 +409,80 @@ pub async fn run(cli: Cli) -> Result<()> {
             amount,
         } => run_faucet(&wallet, &rpc, listen, amount).await,
     }
+}
+
+async fn balance(wallet: &WalletArgs, rpc: &RpcArgs, light: bool) -> Result<()> {
+    let mut client = rpc.connect().await?;
+    let genesis = fetch_genesis(&mut client).await?;
+    let maturity = network_of(&genesis)?.params().coinbase_maturity;
+    let wallet = open_wallet(wallet, genesis)?;
+    let scanned = sync_wallet(&mut client, &wallet, light, maturity).await?;
+    for note in wallet.unspent()? {
+        println!(
+            "note at height {} position {}: {}",
+            note.height,
+            note.position,
+            note.note.value().raw()
+        );
+    }
+    println!("scanned to height {scanned}, balance {}", wallet.balance()?);
+    Ok(())
+}
+
+async fn consolidate(
+    wallet: &WalletArgs,
+    rpc: &RpcArgs,
+    light: bool,
+    dry_run: bool,
+    min_confirmations: u32,
+) -> Result<()> {
+    let mut client = rpc.connect().await?;
+    let genesis = fetch_genesis(&mut client).await?;
+    let network = network_of(&genesis)?;
+    let wallet = open_wallet(wallet, genesis)?;
+    let daemon = crate::walletd::WalletDaemon::new(crate::walletd::ServiceConfig {
+        wallet,
+        network,
+        node: crate::rpc::Source::Remote(rpc.endpoint()?),
+        sync_interval: std::time::Duration::from_secs(1),
+        light,
+    });
+    daemon.scan_once().await?;
+    let quote = daemon
+        .call(
+            "quoteconsolidation",
+            &Params::new(serde_json::json!({ "min_confirmations": min_confirmations })),
+        )
+        .await
+        .map_err(|error| Error::Argument(error.message))?;
+    println!("{quote}");
+    if !dry_run {
+        let result = daemon.call("consolidate", &Params::new(serde_json::json!({
+            "min_confirmations": min_confirmations, "inputs": quote.get("inputs"), "max_fee": quote.get("fee"),
+        }))).await.map_err(|error| Error::Argument(error.message))?;
+        println!("{result}");
+        daemon.sync_once().await?;
+        if let Some(ids) = result
+            .get("operation_ids")
+            .and_then(serde_json::Value::as_array)
+        {
+            for id in ids {
+                let status = daemon
+                    .call("getoperationstatus", &Params::new(serde_json::json!([id])))
+                    .await
+                    .map_err(|error| Error::Argument(error.message))?;
+                println!("{status}");
+                if status.get("status").and_then(serde_json::Value::as_str) == Some("failed") {
+                    return Err(Error::Argument(format!(
+                        "consolidation failed: {}",
+                        status.get("error").unwrap_or(&serde_json::Value::Null)
+                    )));
+                }
+            }
+        }
+        println!("Consolidation transactions recorded for broadcast; rerun balance to scan their confirmations.");
+    }
+    Ok(())
 }
 
 /// Syncs the wallet through the node, then builds and submits a payment.
@@ -919,5 +1003,38 @@ mod tests {
         }
         let explicit = Cli::try_parse_from(["nulld", "keygen", "--network", "test"]).unwrap();
         assert_eq!(network_of_command(&explicit.command), Some(Network::Test));
+    }
+
+    #[test]
+    fn consolidation_cli_supports_a_preview_and_confirmation_filter() {
+        let cli = Cli::try_parse_from([
+            "nulld",
+            "consolidate",
+            "--wallet",
+            "wallet.redb",
+            "--dry-run",
+            "--min-confirmations",
+            "6",
+            "--light",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Consolidate {
+                dry_run: true,
+                min_confirmations: 6,
+                light: true,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["nulld", "consolidate", "--wallet", "wallet.redb"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Consolidate {
+                dry_run: false,
+                min_confirmations: 1,
+                ..
+            }
+        ));
     }
 }

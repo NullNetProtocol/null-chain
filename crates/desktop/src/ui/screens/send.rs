@@ -6,7 +6,7 @@ use null_desktop::backend::Snapshot;
 use serde_json::{json, Value};
 
 use super::{Call, Effect, Reply};
-use crate::ui::format::{coins, field, payment, text};
+use crate::ui::format::{coins, field, number, payment, text};
 use crate::ui::theme::{self, Tone};
 use crate::ui::widgets;
 
@@ -26,6 +26,10 @@ enum Stage {
     Quoting(Value),
     /// Showing the payment and its exact fee for confirmation.
     Reviewing { payment: Value, quote: Value },
+    /// Waiting for a consolidation plan; no notes have been reserved.
+    QuotingConsolidation,
+    /// Reviewing the exact consolidation inputs and total fees.
+    ReviewingConsolidation(Value),
 }
 
 /// Payment inputs and the payment's progress towards the queue.
@@ -47,7 +51,7 @@ impl Form {
             "Payments are shielded. Only you and the recipient see the amount and memo.",
             |ui| match &self.stage {
                 Stage::Editing => self.edit(ui, state),
-                Stage::Quoting(_) => {
+                Stage::Quoting(_) | Stage::QuotingConsolidation => {
                     widgets::card(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -60,6 +64,9 @@ impl Form {
                     let (payment, quote) = (payment.clone(), quote.clone());
                     self.confirm(ui, &payment, &quote)
                 }
+                Stage::ReviewingConsolidation(quote) => {
+                    self.confirm_consolidation(ui, &quote.clone())
+                }
             },
         )
     }
@@ -71,11 +78,26 @@ impl Form {
 
     /// Receives the wallet's answer to a [`Reply::Quote`] call.
     pub fn quoted(&mut self, result: Result<Value, String>) {
+        if !matches!(self.stage, Stage::Quoting(_)) {
+            return;
+        }
         let Stage::Quoting(payment) = std::mem::take(&mut self.stage) else {
             return;
         };
         match result {
             Ok(quote) => self.stage = Stage::Reviewing { payment, quote },
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    /// Receives the consolidation quote, unless its review was discarded.
+    pub fn consolidation_quoted(&mut self, result: Result<Value, String>) {
+        if !matches!(self.stage, Stage::QuotingConsolidation) {
+            return;
+        }
+        self.stage = Stage::Editing;
+        match result {
+            Ok(quote) => self.stage = Stage::ReviewingConsolidation(quote),
             Err(error) => self.error = Some(error),
         }
     }
@@ -95,7 +117,7 @@ impl Form {
         if let Some(error) = &self.error {
             widgets::notice(ui, Tone::Danger, error);
         }
-        widgets::card(ui, |ui| {
+        let payment_effect = widgets::card(ui, |ui| {
             widgets::field_label(ui, "Recipient address", None);
             ui.add(egui::TextEdit::singleline(&mut self.recipient).desired_width(f32::INFINITY));
             widgets::field_label(ui, "Amount", Some("In NULL, up to 8 decimal places."));
@@ -113,7 +135,70 @@ impl Form {
             widgets::primary_button(ui, "Review payment", synced)
                 .clicked()
                 .then(|| self.request_quote(&state.node))
+        });
+        let consolidation_effect = widgets::card(ui, |ui| {
+            widgets::card_title(ui, "Consolidate inputs");
+            widgets::caption(ui, "Combine mined rewards and other small notes into larger notes at your main address. Review the total network fee before starting.");
+            let spendable = synced
+                && state
+                    .wallet
+                    .as_ref()
+                    .is_some_and(|w| field(w, "watch_only").as_bool() != Some(true));
+            widgets::secondary_button(ui, "Consolidate inputs", spendable)
+                .clicked()
+                .then(|| self.request_consolidation())
+        });
+        payment_effect.or(consolidation_effect)
+    }
+
+    fn request_consolidation(&mut self) -> Effect {
+        self.error = None;
+        self.stage = Stage::QuotingConsolidation;
+        Effect::Call(Call {
+            method: "quoteconsolidation",
+            params: json!({ "min_confirmations": MIN_CONFIRMATIONS }),
+            reply: Reply::ConsolidationQuote,
         })
+    }
+
+    fn confirm_consolidation(&mut self, ui: &mut Ui, quote: &Value) -> Option<Effect> {
+        widgets::highlighted_card(ui, |ui| {
+            widgets::card_title(ui, "Review consolidation");
+            widgets::key_value(ui, "Inputs to combine", &number(quote, "input_count"));
+            widgets::key_value(ui, "Transactions", &number(quote, "transactions"));
+            widgets::key_value(
+                ui,
+                "Total network fee",
+                &format!("{} NULL", coins(quote, "fee")),
+            );
+            widgets::key_value(
+                ui,
+                "Returned to your wallet",
+                &format!("{} NULL", coins(quote, "amount")),
+            );
+            widgets::field_label(ui, "Your main address", None);
+            widgets::copyable(ui, text(quote, "address"));
+            widgets::caption(ui, "The new notes become available after confirmation. For a large wallet, consolidate again after confirmation to combine the resulting notes further.");
+            ui.horizontal(|ui| {
+                if widgets::primary_button(ui, "Confirm consolidation", true).clicked() {
+                    return Some(self.consolidate(quote));
+                }
+                if widgets::secondary_button(ui, "Cancel", true).clicked() {
+                    self.discard_review();
+                }
+                None
+            })
+            .inner
+        })
+    }
+
+    fn consolidate(&mut self, quote: &Value) -> Effect {
+        self.discard_review();
+        Call::notice(
+            "consolidate",
+            json!({ "min_confirmations": MIN_CONFIRMATIONS, "inputs": quote.get("inputs"), "max_fee": quote.get("fee") }),
+            "Consolidation queued. Follow its progress in Activity.",
+        )
     }
 
     /// Validates the form locally, then asks the wallet to price it.
@@ -210,6 +295,36 @@ mod tests {
         assert!(matches!(effect, Effect::Notify(_)));
         assert!(matches!(form.stage, Stage::Editing));
         assert!(form.error.is_some());
+    }
+
+    #[test]
+    fn consolidation_is_quoted_and_confirmation_uses_only_the_reviewed_inputs() {
+        let mut form = Form::default();
+        let Effect::Call(call) = form.request_consolidation() else {
+            panic!("expected quote");
+        };
+        assert_eq!(call.method, "quoteconsolidation");
+        assert_eq!(call.reply, Reply::ConsolidationQuote);
+        let quote = json!({ "inputs": [3, 7], "fee": "20000" });
+        form.consolidation_quoted(Ok(quote.clone()));
+        assert!(matches!(form.stage, Stage::ReviewingConsolidation(_)));
+        form.quoted(Ok(json!({}))); // A stale payment quote cannot replace this review.
+        assert!(matches!(form.stage, Stage::ReviewingConsolidation(_)));
+        let Effect::Call(call) = form.consolidate(&quote) else {
+            panic!("expected consolidation");
+        };
+        assert_eq!(call.method, "consolidate");
+        assert_eq!(call.params["inputs"], quote["inputs"]);
+        assert_eq!(call.params["max_fee"], quote["fee"]);
+        assert!(matches!(form.stage, Stage::Editing));
+        form.consolidation_quoted(Ok(quote));
+        assert!(
+            matches!(form.stage, Stage::Editing),
+            "a discarded quote stays discarded"
+        );
+        form.request_consolidation();
+        form.consolidation_quoted(Err("busy".into()));
+        assert_eq!(form.error.as_deref(), Some("busy"));
     }
 
     #[test]

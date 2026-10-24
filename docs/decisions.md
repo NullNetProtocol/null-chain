@@ -1303,3 +1303,31 @@ template cache, so a cached template is not served after the last mainnet
 peer leaves (regression test in `tests/mining.rs`). And `--log-file` makes
 an existing file owner-only on open, not only a new one: the 0600 creation
 mode does not touch a file that already exists with broader permissions.
+
+## 2026-10-24: Explicit consolidation to the main address
+
+Mining leaves one note per reward. A payment can spend at most sixteen
+notes, so a wallet can have enough total value but still be unable to make
+a large payment. Chosen: explicit `quoteconsolidation`/`consolidate` wallet
+RPCs, a `nulld consolidate` command with `--dry-run`, and a fee review on
+the desktop Send page. Eligible notes from all wallet addresses are grouped
+into disjoint batches of 2–16, each paying one output to index 0. Fees are
+deducted from those outputs; a final single note and uneconomic batches
+are left alone. Subsequent requests can merge confirmed outputs further.
+
+The alternatives were raising the consensus action limit, automatically
+merging before a payment, or continually merging new mining rewards. The
+explicit operation keeps fees under the user's control and uses existing
+transaction shapes and consensus rules. A quote returns the exact note
+positions and total fee; the GUI confirms those positions with a fee cap.
+An active scan/proof returns a retryable busy error rather than blocking
+the GUI behind a prover. Selection and reservation share the worker lock,
+and all batch operations and input reservations commit atomically.
+
+Batches are ordinary persisted self-payments, so existing restart recovery,
+pre-broadcast recording, cancellation, reorg reconciliation and anchor
+expiry handling apply without changing the operation encoding. A reserved
+first build consumes every selected note: greedy payment selection could
+otherwise omit a tiny note at a fee-tier boundary and fail to consolidate
+it. The CLI preview only scans; execution runs the same wallet worker and
+prints the operation ids and their resulting states.

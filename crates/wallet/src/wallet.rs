@@ -778,25 +778,49 @@ impl Wallet {
         min_confirmations: u32,
         created_at: u64,
     ) -> Result<Operation> {
+        self.add_reserved_operations(
+            vec![(recipients, Vec::new())],
+            min_confirmations,
+            created_at,
+        )?
+        .pop()
+        .ok_or(Error::Corrupt("new operation missing"))
+    }
+
+    /// Atomically queues payments with their input reservations. The caller
+    /// must serialize selection with the payment worker and other selectors.
+    ///
+    /// # Errors
+    /// Fails on a database error or exhausted ids; no partial batch is saved.
+    pub fn add_reserved_operations(
+        &self,
+        payments: Vec<(Vec<Payment>, Vec<u64>)>,
+        min_confirmations: u32,
+        created_at: u64,
+    ) -> Result<Vec<Operation>> {
         let tx = self.db.begin_write()?;
-        let operation = {
+        let mut queued = Vec::new();
+        {
             let mut meta = tx.open_table(META)?;
-            let id = meta
+            let mut id = meta
                 .get(NEXT_OPERATION)?
                 .map(|v| decode_u64(v.value()))
                 .transpose()?
                 .unwrap_or(1);
-            let next = id
-                .checked_add(1)
-                .ok_or(Error::Corrupt("operation id exhausted"))?;
-            meta.insert(NEXT_OPERATION, next.to_le_bytes().as_slice())?;
-            let operation = Operation::new(id, created_at, recipients, min_confirmations);
             let mut operations = tx.open_table(OPERATIONS)?;
-            operations.insert(id, self.seal_operation(&operation)?.as_slice())?;
-            operation
-        };
+            for (recipients, locked) in payments {
+                let mut operation = Operation::new(id, created_at, recipients, min_confirmations);
+                operation.locked = locked;
+                operations.insert(id, self.seal_operation(&operation)?.as_slice())?;
+                queued.push(operation);
+                id = id
+                    .checked_add(1)
+                    .ok_or(Error::Corrupt("operation id exhausted"))?;
+            }
+            meta.insert(NEXT_OPERATION, id.to_le_bytes().as_slice())?;
+        }
         tx.commit()?;
-        Ok(operation)
+        Ok(queued)
     }
 
     /// Stores the current state of an operation.
@@ -1359,6 +1383,54 @@ mod tests {
         assert!(!wallet
             .compare_and_swap_operation(&cancelled, &cancelled)
             .unwrap());
+    }
+
+    #[test]
+    fn reserved_batches_survive_reopening_and_a_failed_batch_is_atomic() {
+        let mut rng = ChaCha20Rng::seed_from_u64(61);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reserved.redb");
+        let wallet = Wallet::create(&path, &sk(61), BlockHash::ZERO, b"pw", &mut rng).unwrap();
+        let payment = Payment {
+            recipient: wallet.keys().default_address().unwrap(),
+            amount: Amount::from_raw(1_000_000).unwrap(),
+            memo: Memo::empty(),
+        };
+        let queued = wallet
+            .add_reserved_operations(
+                vec![
+                    (vec![payment.clone()], vec![1, 2]),
+                    (vec![payment.clone()], vec![3, 4]),
+                ],
+                2,
+                99,
+            )
+            .unwrap();
+        assert_eq!(wallet.locked_positions().unwrap(), [1, 2, 3, 4]);
+        drop(wallet);
+        let wallet = Wallet::open(&path, BlockHash::ZERO, b"pw").unwrap();
+        assert_eq!(wallet.operations().unwrap(), queued);
+        let tx = wallet.db.begin_write().unwrap();
+        tx.open_table(META)
+            .unwrap()
+            .insert(NEXT_OPERATION, (u64::MAX - 1).to_le_bytes().as_slice())
+            .unwrap();
+        tx.commit().unwrap();
+        assert!(wallet
+            .add_reserved_operations(
+                vec![
+                    (vec![payment.clone()], vec![5, 6]),
+                    (vec![payment], vec![7, 8])
+                ],
+                1,
+                100
+            )
+            .is_err());
+        assert_eq!(
+            wallet.operations().unwrap(),
+            queued,
+            "no partial queue on failure"
+        );
     }
 
     #[test]
