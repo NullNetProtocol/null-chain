@@ -173,8 +173,11 @@ minutes and at most 64 are kept. With `longpollid` set to the tip the
 pool last saw, the call waits up to 60 seconds for the tip to change
 before answering, so a pool need not poll. `--blocknotify '<command>'`
 runs a shell command with `%s` replaced by the hash of every new tip,
-for pools that prefer a hook. Templates are refused while the node is
-syncing.
+for pools that prefer a hook. Templates are refused (`REJECTED`,
+`not ready to mine: no peers yet` or `…: catching up with the network`)
+until the node is caught up: on mainnet it needs a ready peer, and on
+either network no sync may be running and no peer may report a longer
+chain than its own. The built-in miner follows the same rule.
 
 **Submission.** By template id the pool sends only what it changed:
 timestamp, nonce and solution; the node reassembles the block from the

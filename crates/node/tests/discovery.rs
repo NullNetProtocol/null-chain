@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use null_node::config::{Config, OUTBOUND_TARGET};
 use null_node::node::{spawn, Event, Handle, PeerSummary, Request, Response};
+use null_p2p::addrbook::Snapshot;
 use null_p2p::message::{Message, PeerAddr};
 use null_p2p::noise::Role;
 use null_p2p::peer::{version_info, Direction};
@@ -430,4 +431,57 @@ async fn a_forwarded_port_override_is_verified_and_shared() {
     relay.abort();
     node.shutdown().await;
     seed.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_node_still_shares_the_listeners_it_verified() {
+    let dir = tempfile::tempdir().unwrap();
+    let listening = spawn(Config {
+        listen: Some(listener()),
+        ..Config::test()
+    })
+    .await
+    .unwrap();
+    let target = listening.listen_addr.unwrap();
+    let node = spawn(Config {
+        datadir: Some(dir.path().to_path_buf()),
+        connect: vec![target.to_string()],
+        ..Config::test()
+    })
+    .await
+    .unwrap();
+    wait_for(&[&node], async || {
+        peers(&node)
+            .await
+            .iter()
+            .any(|p| p.ready && p.addr == target)
+    })
+    .await;
+    node.shutdown().await;
+
+    let saved =
+        Snapshot::from_bytes(&std::fs::read(dir.path().join("peers.dat")).unwrap()).unwrap();
+    let entry = saved
+        .entries()
+        .iter()
+        .find(|s| s.addr.key() == address(target).key());
+    assert!(entry.unwrap().verified_at.is_some(), "saved as verified");
+
+    // With the listener gone the restarted node cannot verify it again, so
+    // sharing it proves the verification came from disk.
+    listening.shutdown().await;
+    let restarted = spawn(Config {
+        datadir: Some(dir.path().to_path_buf()),
+        listen: Some(listener()),
+        ..Config::test()
+    })
+    .await
+    .unwrap();
+    let mut client = Client::connect(&restarted).await;
+    let shared = client.get_addr().await;
+    assert!(
+        shared.iter().any(|a| a.key() == address(target).key()),
+        "{shared:?}"
+    );
+    restarted.shutdown().await;
 }

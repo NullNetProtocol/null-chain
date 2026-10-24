@@ -111,6 +111,8 @@ Tick an item only when it has tests and passes clippy.
 - [x] Peer discovery bootstraps: dialed peers enter the address book and are gossiped, so a node reaches peers it was never configured with
 - [x] Listening nodes advertise through existing `Addr` messages; direct public interfaces are automatic, `--advertise` / desktop `advertise` overrides forwarded ports; endpoints are handshaken before relay, full nodes use one bounded probe, and established peers refresh every ten minutes; private transports suppress announcements (2026-10-20)
 - [x] Discovery hardening: verified addresses pulled, never pushed, with hour-rounded timestamps; only outbound peers asked for lists, per-peer gossip allowance, gossip cannot renew entries; IPv4 announced from `[::]` only when the socket is dual-stack; longer I2P dial deadline; failures recorded against the dialed endpoint; desktop validates `advertise`; release 0.1.6 (2026-10-22)
+- [x] Persistent address book: `peers.dat` in the data directory (canonical `Snapshot` encoding, garbage rejected, entries re-checked against gossip rules and the network policy on load, verification times kept, never trusted from the future), saved every ten minutes and on shutdown, atomically and owner-only; not kept behind a proxy or I2P (2026-10-22)
+- [ ] Persist bans and failure back-off with the address book if restarts turn out to forgive misbehaving peers too quickly
 - [ ] Cache `GetAddr` replies per period (as Bitcoin does) so reconnecting peers cannot diff samples to infer current outbound peers
 - [x] Headers-first sync state machine: locator, chained header acceptance, bounded in-flight block requests with timeouts
 - [x] Dandelion++ routing state: epochs, stem map, fluff probability, embargo timers
@@ -141,6 +143,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Metrics endpoint: `--metrics <addr>` serves Prometheus text at `/metrics`; status line and metrics count blocks mined against blocks in the main chain
 - [x] Miner task: templates from the loop, coinbase proving and Equihash off the runtime
 - [x] Ctrl-C shutdown
+- [x] `--log-file <path>` for `nulld run` and `null-wallet-rpc`: lines also appended to a file, dated (UTC) and uncolored, owner-only on Unix (2026-10-22)
 - [x] Crash recovery tests: a failed store apply leaves no partial state; a node resumes its chain after a restart
 
 ## Phase 8: Hardening and launch
@@ -196,6 +199,9 @@ Tick an item only when it has tests and passes clippy.
 - [x] Mainnet PoW limit eased to `0x200fffff` from height 11 (about 16 solutions per block instead of 8,192), so the seeds reach the block interval; stores from 0.1.3 and earlier resync; release 0.1.4 (2026-10-17)
 - [x] Miners drop a template once the best tip moves (node tip watch); a mining wallet is exempt from idle auto-lock (2026-09-28)
 - [x] Release archives: `make dist` (Linux glibc 2.28 and Windows via Zig) and a tag-triggered release workflow for Linux, Windows, and macOS (arm64 and x86_64) (2026-09-28)
+- [x] Mining waits until the node is caught up: no work for the built-in miner or `getblocktemplate` while syncing, while a peer reports a longer chain, or on mainnet without a peer; a sync that makes no progress for 120 s drops its peer; the desktop Mining card shows "Waiting for sync" with the reason, and `/metrics` has `null_mining_ready` (2026-10-24)
+- [x] Release version (`vX.Y.Z`) always visible at the bottom of the desktop sidebar; the release workflow fails on a tag that does not match the workspace version (2026-10-24)
+- [x] Log file switch on the Node page (`log_file` in `null.conf`, off by default for privacy), `<network>/debug.log` rotated to `debug.log.1` above 10 MiB at start (2026-10-22)
 - [ ] Installers and signing: macOS .app bundle and notarization, Windows installer with the exe icon and Authenticode signing, Linux AppImage
 - [x] Activity as one list with local dates and times, All/Sent/Received/Mined filters, change hidden by default, search, and pages of 20; mined rewards dated by their paying block; release 0.1.5 (2026-10-19)
 - [ ] Transaction detail view (`gettransaction`), file pickers, viewing-key export and rescan from the GUI

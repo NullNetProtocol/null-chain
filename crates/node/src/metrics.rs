@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::http::{read_get_path, respond};
-use crate::node::{Event, Request, Response};
+use crate::node::{Event, NotReady, Request, Response};
 use crate::{Error, Result};
 
 /// A snapshot of what the node is doing.
@@ -32,6 +32,9 @@ pub struct Metrics {
     pub pending_compact_blocks: usize,
     /// Seconds since the node started.
     pub uptime_seconds: u64,
+    /// Why the node would refuse mining work now, or `None` if it would
+    /// hand it out.
+    pub mining_waits: Option<NotReady>,
 }
 
 /// Renders the snapshot in the Prometheus text format.
@@ -77,6 +80,11 @@ pub fn render(m: &Metrics) -> String {
         "null_uptime_seconds",
         "Seconds since the node started.",
         format!("null_uptime_seconds {}", m.uptime_seconds),
+    );
+    gauge(
+        "null_mining_ready",
+        "1 if the node hands out mining work (caught up, and a peer on mainnet), else 0.",
+        format!("null_mining_ready {}", u8::from(m.mining_waits.is_none())),
     );
     out
 }
@@ -139,6 +147,7 @@ mod tests {
             blocks_mined_in_chain: 4,
             pending_compact_blocks: 0,
             uptime_seconds: 60,
+            mining_waits: Some(NotReady::Syncing),
         });
         for line in [
             "# TYPE null_height gauge",
@@ -150,6 +159,7 @@ mod tests {
             "null_blocks_mined{state=\"in_chain\"} 4",
             "null_pending_compact_blocks 0",
             "null_uptime_seconds 60",
+            "null_mining_ready 0",
         ] {
             assert!(text.lines().any(|l| l == line), "missing {line}");
         }

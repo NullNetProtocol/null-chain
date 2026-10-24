@@ -67,6 +67,23 @@ impl PeerAddr {
     pub fn key(&self) -> ([u8; 16], u16) {
         (self.ip, self.port)
     }
+
+    /// Appends `ip | port (u16 LE) | last_seen (u64 LE)`, the layout shared
+    /// by `Addr` messages and saved address books.
+    pub(crate) fn write(&self, w: &mut Writer) {
+        w.put(&self.ip)
+            .put(&self.port.to_le_bytes())
+            .put_u64_le(self.last_seen);
+    }
+
+    /// Reads the layout [`PeerAddr::write`] produces.
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
+            ip: r.take_array()?,
+            port: u16::from_le_bytes(r.take_array()?),
+            last_seen: r.take_u64_le()?,
+        })
+    }
 }
 
 /// A block or transaction reference.
@@ -229,9 +246,7 @@ impl Message {
             Self::Addr(addrs) => {
                 put_count(&mut w, addrs.len());
                 for a in addrs {
-                    w.put(&a.ip)
-                        .put(&a.port.to_le_bytes())
-                        .put_u64_le(a.last_seen);
+                    a.write(&mut w);
                 }
             }
             Self::GetHeaders { locator, stop } => {
@@ -310,13 +325,7 @@ impl Message {
             tag::ADDR => {
                 let count = take_count(&mut r, MAX_ADDRESSES, "addresses")?;
                 let addrs = (0..count)
-                    .map(|_| {
-                        Ok(PeerAddr {
-                            ip: r.take_array()?,
-                            port: u16::from_le_bytes(r.take_array()?),
-                            last_seen: r.take_u64_le()?,
-                        })
-                    })
+                    .map(|_| PeerAddr::read(&mut r))
                     .collect::<Result<Vec<_>>>()?;
                 Self::Addr(addrs)
             }
@@ -387,12 +396,12 @@ impl Message {
     }
 }
 
-fn put_count(w: &mut Writer, count: usize) {
+pub(crate) fn put_count(w: &mut Writer, count: usize) {
     // Every list is bounded by a limit far below u32::MAX.
     w.put(&u32::try_from(count).unwrap_or(u32::MAX).to_le_bytes());
 }
 
-fn take_count(r: &mut Reader<'_>, max: usize, what: &'static str) -> Result<usize> {
+pub(crate) fn take_count(r: &mut Reader<'_>, max: usize, what: &'static str) -> Result<usize> {
     let count = usize::try_from(u32::from_le_bytes(r.take_array()?))
         .map_err(|_| Error::ListTooLong(what))?;
     if count > max {

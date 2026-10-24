@@ -173,6 +173,9 @@ pub enum Command {
         /// Log level: debug, info, warn or error.
         #[arg(long, default_value = "info")]
         log_level: crate::logging::Level,
+        /// Also append log lines to this file, dated and without colors.
+        #[arg(long)]
+        log_file: Option<PathBuf>,
     },
     /// Generate a seed phrase with its account 0 spending key and default
     /// address, without a file.
@@ -318,8 +321,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             metrics,
             blocknotify,
             log_level,
+            log_file,
         } => {
-            crate::logging::set_level(log_level);
+            crate::logging::init(log_level, log_file.as_deref())?;
             let token = rpc_token.as_deref().map(Token::new).transpose()?;
             run_node(RunOptions {
                 network,

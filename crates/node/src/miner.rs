@@ -26,6 +26,9 @@ use crate::{Error, Result};
 
 /// Nonces tried per template before asking for a fresh one.
 const NONCES_PER_TEMPLATE: u32 = 32;
+/// How long a worker waits before asking again when the node is not
+/// ready to mine (no peers, or catching up).
+const NOT_READY_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What a miner needs to build the next block.
 #[derive(Clone, Debug)]
@@ -263,8 +266,15 @@ impl Worker {
                 .send(Event::TemplateRequest(reply))
                 .await
                 .map_err(|_| Error::Stopped)?;
-            let Ok(template) = response.await else {
-                return Err(Error::Stopped);
+            let template = match response.await {
+                Ok(Ok(template)) => template,
+                Ok(Err(_)) => {
+                    // The node logs why; mining on its tip now would only
+                    // find blocks the network has already moved past.
+                    tokio::time::sleep(NOT_READY_RETRY).await;
+                    continue;
+                }
+                Err(_) => return Err(Error::Stopped),
             };
             let (payout, pow, pk) = (self.payout, self.pow, Arc::clone(&self.pk));
             let (stop, tip, parent) = (

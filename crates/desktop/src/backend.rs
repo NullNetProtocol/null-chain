@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
 use crate::block_times::{BlockFacts, BlockTimes, LOOKUPS_PER_REFRESH};
-use crate::config::{self, Mining};
+use crate::config::{self, LogFile, Mining};
 
 /// Desktop configuration; the node has no separate control socket.
 pub struct Config {
@@ -38,7 +38,9 @@ pub struct Config {
     pub wallet: PathBuf,
     /// Saved mining settings; mining starts on unlock when enabled.
     pub mining: Mining,
-    /// The configuration file the mining switch saves to.
+    /// The saved log file switch and where the log goes.
+    pub log: LogFile,
+    /// The configuration file the mining and log switches save to.
     pub settings: PathBuf,
 }
 
@@ -67,6 +69,8 @@ pub enum Action {
     /// needs an unlocked wallet and always pays its main (index 0) address.
     /// The choice is saved and resumes on the next unlock.
     SetMining(Mining),
+    /// Start or stop writing the log file. The choice is saved.
+    SetLogFile(bool),
     /// Invoke a method on the same services used by HTTP RPC.
     Call {
         /// RPC method name.
@@ -122,6 +126,8 @@ pub struct Snapshot {
     /// Built-in miner: saved choice, whether it runs, threads, payout
     /// address, and blocks found and in the main chain.
     pub mining: Value,
+    /// Whether the log file is being written.
+    pub log_file: bool,
     /// Startup or refresh error.
     pub error: Option<String>,
 }
@@ -226,6 +232,7 @@ struct State {
     wallet_path: PathBuf,
     miner: Option<Miner>,
     mining: Mining,
+    log: LogFile,
     settings: PathBuf,
     block_times: BlockTimes,
 }
@@ -257,6 +264,11 @@ async fn run(
     {
         std::fs::create_dir_all(parent)?;
     }
+    // Before the node starts, so the log file has its first lines. A log
+    // that cannot be opened only costs the file, so it is not fatal.
+    if let Err(error) = config.log.apply() {
+        null_node::logging::warn(&format!("log file not written: {error}"));
+    }
     let network = config.node.network;
     let node = node::spawn(config.node).await?;
     // Acquire the chain database before replacing its token: a second
@@ -274,6 +286,7 @@ async fn run(
         wallet_path: config.wallet,
         miner: None,
         mining: config.mining.clamped(),
+        log: config.log,
         settings: config.settings,
         block_times: BlockTimes::default(),
     };
@@ -381,6 +394,26 @@ impl State {
         ))
     }
 
+    fn set_log_file(&mut self, enabled: bool) -> Result<Outcome> {
+        let log = LogFile {
+            enabled,
+            ..self.log.clone()
+        };
+        log.apply()?;
+        self.log = log;
+        let message = if enabled {
+            format!("Writing the log to {}", self.log.path.display())
+        } else {
+            "Log file off".into()
+        };
+        Ok(Outcome::message(
+            match config::save_log_file(&self.settings, enabled) {
+                Ok(()) => message,
+                Err(error) => format!("{message}, but saving null.conf failed: {error}"),
+            },
+        ))
+    }
+
     async fn action(&mut self, action: Action) -> Result<Outcome> {
         match action {
             Action::Lock => {
@@ -414,6 +447,7 @@ impl State {
                 })
             }
             Action::SetMining(mining) => self.set_mining(mining),
+            Action::SetLogFile(enabled) => self.set_log_file(enabled),
             Action::Call { method, params } => {
                 let result = self
                     .call(&method, &Params::new(params))
@@ -476,6 +510,7 @@ impl State {
             );
         }
         snapshot.mining = self.mining_json().await?;
+        snapshot.log_file = self.log.enabled;
         if let Some(service) = &self.wallet {
             snapshot.wallet = Some(service.daemon.call("getwalletinfo", &params).await?);
             snapshot.balance = service.daemon.call("getbalance", &params).await?;
@@ -519,9 +554,9 @@ impl State {
     }
 
     async fn mining_json(&self) -> std::result::Result<Value, RpcError> {
-        let (found, in_chain) = match self.node.request(Request::Metrics).await? {
-            Response::Metrics(m) => (m.blocks_mined, m.blocks_mined_in_chain),
-            _ => (0, 0),
+        let (found, in_chain, waits) = match self.node.request(Request::Metrics).await? {
+            Response::Metrics(m) => (m.blocks_mined, m.blocks_mined_in_chain, m.mining_waits),
+            _ => (0, 0, None),
         };
         let prefix = self.network.address_prefix();
         Ok(json!({
@@ -532,6 +567,7 @@ impl State {
             "payout": self.miner.as_ref().map(|m| m.payout.encode(prefix)),
             "found": found,
             "in_chain": in_chain,
+            "waiting": waits.map(|reason| reason.to_string()),
         }))
     }
 

@@ -41,7 +41,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::config::{Network, MEMPOOL_CAPACITY};
 use crate::http::{read_request, respond_with, Request as HttpRequest};
 use crate::miner::Template;
-use crate::node::{Event, Located, PeerSummary, Request, Response, Submission, TxStatus};
+use crate::node::{Event, Located, NotReady, PeerSummary, Request, Response, Submission, TxStatus};
 use crate::rpc::Token;
 use crate::{now, Error, Result};
 
@@ -292,7 +292,20 @@ impl Context {
             .send(Event::TemplateRequest(reply))
             .await
             .map_err(|_| Error::Stopped)?;
-        response.await.map_err(|_| RpcError::from(Error::Stopped))
+        response
+            .await
+            .map_err(|_| RpcError::from(Error::Stopped))?
+            .map_err(not_ready)
+    }
+
+    /// Fails unless the node would hand out mining work now, so a cached
+    /// template is not served after the node lost its peers or fell behind.
+    async fn ready_to_mine(&self) -> core::result::Result<(), RpcError> {
+        match self.ask(Request::MiningReadiness).await? {
+            Response::MiningReadiness(None) => Ok(()),
+            Response::MiningReadiness(Some(reason)) => Err(not_ready(reason)),
+            other => Err(unexpected(&other)),
+        }
     }
 
     /// A template for `payout`: a fresh cached one, or one newly built
@@ -301,10 +314,8 @@ impl Context {
         &self,
         payout: Address,
     ) -> core::result::Result<(String, CachedTemplate), RpcError> {
-        let (height, tip, _, _, syncing) = self.tip().await?;
-        if syncing {
-            return Err(RpcError::new(REJECTED, "node is syncing"));
-        }
+        self.ready_to_mine().await?;
+        let (height, tip, ..) = self.tip().await?;
         let at = now();
         if let Some(found) = lock(&self.templates)?.find(&payout, tip, at) {
             return Ok(found);
@@ -1052,6 +1063,11 @@ async fn next_hash(
     }
 }
 
+/// The error for a template request the node refused; see [`NotReady`].
+fn not_ready(reason: NotReady) -> RpcError {
+    RpcError::new(REJECTED, format!("not ready to mine: {reason}"))
+}
+
 fn unexpected(response: &Response) -> RpcError {
     RpcError::new(
         INTERNAL_ERROR,
@@ -1069,6 +1085,7 @@ fn variant_name(response: &Response) -> &'static str {
         Response::Submitted(_) => "submitted",
         Response::Spent(_) => "spent",
         Response::Metrics(_) => "metrics",
+        Response::MiningReadiness(_) => "mining readiness",
         Response::Transaction(_) => "transaction",
         Response::TransactionStatus(_) => "transaction status",
         Response::Txids(_) => "txids",

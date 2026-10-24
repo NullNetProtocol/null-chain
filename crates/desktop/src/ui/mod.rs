@@ -203,6 +203,7 @@ impl App {
                     ui.add_space(theme::SPACE_XS);
                 }
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                    widgets::caption(ui, &version_label());
                     self.wallet_status(ui, state);
                 });
             });
@@ -265,6 +266,12 @@ impl App {
 }
 
 /// Whether the built-in miner is running.
+/// The release this build belongs to, as its tag is written (`v0.1.6`);
+/// the release workflow refuses a tag that differs from the crate version.
+fn version_label() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
 fn mining_active(state: &Snapshot) -> bool {
     format::field(&state.mining, "active").as_bool() == Some(true)
 }
@@ -366,6 +373,7 @@ mod tests {
             data: PathBuf::from("/data"),
             config: PathBuf::from("/data/null.conf"),
             wallet: PathBuf::from("/data/test/wallet.redb"),
+            log: PathBuf::from("/data/test/debug.log"),
         }
     }
 
@@ -388,6 +396,7 @@ mod tests {
             received: json!([{ "amount": "5", "confirmations": 0, "memo": "thanks" }]),
             mining: json!({ "enabled": true, "active": true, "threads": 2, "max_threads": 8,
                 "payout": "tnull1xyz", "found": 3, "in_chain": 2 }),
+            log_file: false,
             error: None,
         }
     }
@@ -430,6 +439,13 @@ mod tests {
             });
         });
         assert!(!dismissed);
+    }
+
+    #[test]
+    fn the_version_label_reads_like_the_release_tag() {
+        let label = version_label();
+        assert_eq!(label, concat!("v", env!("CARGO_PKG_VERSION")));
+        assert_eq!(label.split('.').count(), 3, "{label}");
     }
 
     #[test]

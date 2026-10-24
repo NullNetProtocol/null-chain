@@ -98,14 +98,7 @@ impl Token {
     /// # Errors
     /// Fails if the file cannot be written.
     pub fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        std::fs::write(path, self.expose())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
+        crate::paths::write_private(path.as_ref(), self.expose().as_bytes())
     }
 
     /// The token text, for writing it out or presenting it.
@@ -301,6 +294,8 @@ pub fn format(response: &Response) -> String {
             format!("ok confirmed {height} {index}")
         }
         Response::Spent(spent) => format!("ok {spent}"),
+        Response::MiningReadiness(None) => "ok ready".into(),
+        Response::MiningReadiness(Some(reason)) => format!("ok waiting {reason}"),
         Response::Metrics(metrics) => {
             format!("ok {}", crate::metrics::render(metrics).replace('\n', " "))
         }

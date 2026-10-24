@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use null_chain::chain::{Chain, Import};
@@ -16,6 +17,7 @@ use null_p2p::dandelion::{Dandelion, Route};
 use null_p2p::message::{CompactBlock, Inventory, Message, PeerAddr, VersionInfo, MAX_HEADERS};
 use null_p2p::peer::{version_info, Direction, Event as PeerEvent, Peer, SELF_CONNECTION};
 use null_p2p::sync::{locator, BlockSync};
+use null_protocol::address::Address;
 use null_protocol::block::{Block, BlockHash, BlockHeader};
 use null_protocol::compact::CompactBlock as LightBlock;
 use null_protocol::consensus::{next_height, MAX_BLOCK_TRANSACTIONS};
@@ -35,6 +37,7 @@ use crate::i2p::SamSession;
 use crate::logging;
 use crate::metrics::Metrics;
 use crate::miner::Template;
+use crate::peers_file;
 use crate::rpc::{Token, TOKEN_FILE};
 use crate::{now, Error, Result};
 
@@ -51,6 +54,47 @@ const MAX_PENDING_BLOCKS: usize = 16;
 /// Mined blocks remembered for the stale-block counters; older ones are
 /// forgotten first.
 const MAX_MINED_RECORDS: usize = 100_000;
+/// Seconds a sync may go without a new header or block before the node
+/// gives up on its peer, so a peer that claims a long chain and never
+/// sends it cannot hold the node in sync, and its miners idle, forever.
+const SYNC_STALL_SECONDS: u64 = 120;
+
+/// Why the node hands out no mining work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotReady {
+    /// No peer has finished its handshake, on a network that needs one.
+    NoPeers,
+    /// Blocks are downloading, or a peer reported a longer chain.
+    Syncing,
+}
+
+impl std::fmt::Display for NotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoPeers => "no peers yet",
+            Self::Syncing => "catching up with the network",
+        })
+    }
+}
+
+/// What keeps a node from mining on its tip, if anything: no ready peer
+/// when the network needs one, a sync in progress, or a ready peer whose
+/// handshake height is above `ours` and not yet settled.
+fn mining_blocker(
+    needs_peers: bool,
+    ready_peers: usize,
+    syncing: bool,
+    ours: u32,
+    mut claims: impl Iterator<Item = u32>,
+) -> Option<NotReady> {
+    if needs_peers && ready_peers == 0 {
+        Some(NotReady::NoPeers)
+    } else if syncing || claims.any(|height| height > ours) {
+        Some(NotReady::Syncing)
+    } else {
+        None
+    }
+}
 
 /// Everything the loop reacts to.
 #[derive(Debug)]
@@ -100,8 +144,8 @@ pub enum Event {
     Tick,
     /// The miner found a block.
     Mined(Box<Block>),
-    /// The miner wants a template.
-    TemplateRequest(oneshot::Sender<Template>),
+    /// The miner wants a template; refused until the node is caught up.
+    TemplateRequest(oneshot::Sender<core::result::Result<Template, NotReady>>),
     /// A local control request.
     Rpc {
         /// The request.
@@ -133,6 +177,8 @@ pub enum Request {
     IsSpent(Nullifier),
     /// A metrics snapshot.
     Metrics,
+    /// Why the node would refuse mining work now, if it would.
+    MiningReadiness,
     /// A block by hash, main chain or not.
     BlockByHash(BlockHash),
     /// A main-chain transaction by id, with where it is.
@@ -265,6 +311,8 @@ pub enum Response {
     Spent(bool),
     /// A metrics snapshot.
     Metrics(Box<Metrics>),
+    /// `None` if the node hands out mining work, else why not.
+    MiningReadiness(Option<NotReady>),
     /// A transaction, if known.
     Transaction(Option<Located>),
     /// Where a transaction is.
@@ -296,6 +344,9 @@ struct PeerHandle {
     addr_allowance: usize,
     /// When the connection finished its handshake.
     connected_at: std::time::Instant,
+    /// Whether its handshake height no longer counts as a longer chain:
+    /// we synced from it until it had nothing more, or it stalled a sync.
+    claim_settled: bool,
 }
 
 impl PeerHandle {
@@ -330,9 +381,15 @@ pub struct Node {
     chain: Chain,
     mempool: Mempool,
     book: AddressBook,
+    /// Where the book is saved; see [`peers_file::path`].
+    peers_path: Option<PathBuf>,
     dandelion: Dandelion<PeerId>,
     sync: BlockSync,
     sync_peer: Option<PeerId>,
+    /// When the current sync last received a header or block.
+    sync_progress_at: u64,
+    /// The last reason miners were refused work, logged when it changes.
+    mining_blocked: Option<NotReady>,
     peers: HashMap<PeerId, PeerHandle>,
     dialing: HashMap<PeerId, String>,
     /// Short reachability checks when all regular outbound slots are occupied.
@@ -451,19 +508,8 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         }
         None => None,
     };
-    if let Some(miner) = config.mine_to {
-        let miner = crate::miner::start(
-            miner,
-            params,
-            config.mining_threads,
-            events.clone(),
-            tip.subscribe(),
-        );
-        tasks.spawn(async move {
-            if let Err(error) = miner.wait().await {
-                logging::warn(&format!("miner stopped: {error}"));
-            }
-        });
+    if let Some(payout) = config.mine_to {
+        spawn_miner(&mut tasks, payout, &config, &events, &tip);
     }
     let clock = events.clone();
     tasks.spawn(async move {
@@ -477,15 +523,19 @@ pub async fn spawn(config: Config) -> Result<Handle> {
     });
 
     let rng = StdRng::from_entropy();
+    let (peers_path, book) = saved_book(&config);
     let node = Node {
         network: config.network,
         params,
         chain,
         mempool: Mempool::new(MEMPOOL_CAPACITY),
-        book: AddressBook::new(),
+        book,
+        peers_path,
         dandelion: Dandelion::new(now()),
         sync: BlockSync::new(),
         sync_peer: None,
+        sync_progress_at: 0,
+        mining_blocked: None,
         peers: HashMap::new(),
         dialing: HashMap::new(),
         probes: HashSet::new(),
@@ -627,6 +677,40 @@ fn dialed_key(target: &str) -> Option<([u8; 16], u16)> {
     target.parse::<SocketAddr>().ok().map(addr_key)
 }
 
+/// Starts the `--mine` miner as one of the node's tasks; it stops with them.
+fn spawn_miner(
+    tasks: &mut JoinSet<()>,
+    payout: Address,
+    config: &Config,
+    events: &mpsc::Sender<Event>,
+    tip: &watch::Sender<BlockHash>,
+) {
+    let miner = crate::miner::start(
+        payout,
+        config.network.params(),
+        config.mining_threads,
+        events.clone(),
+        tip.subscribe(),
+    );
+    tasks.spawn(async move {
+        if let Err(error) = miner.wait().await {
+            logging::warn(&format!("miner stopped: {error}"));
+        }
+    });
+}
+
+/// The address book `config` starts from and where it is saved: the saved
+/// book filtered by this network's gossip policy, or an empty one.
+fn saved_book(config: &Config) -> (Option<PathBuf>, AddressBook) {
+    let path = peers_file::path(config);
+    let book = path.as_deref().map_or_else(AddressBook::new, |path| {
+        peers_file::load(path, now(), |a| {
+            discovery::allowed(key_addr(a.key()), config.network)
+        })
+    });
+    (path, book)
+}
+
 fn key_addr(key: ([u8; 16], u16)) -> SocketAddr {
     let ip = std::net::Ipv6Addr::from(key.0);
     ip.to_ipv4_mapped().map_or_else(
@@ -644,6 +728,17 @@ impl Node {
             }
             if let Err(error) = self.handle(event) {
                 logging::error(&format!("loop error: {error}"));
+            }
+        }
+        self.save_peers();
+    }
+
+    /// Writes the address book to disk when this node keeps one. A failure
+    /// only costs the next start its warm book, so it is reported, not fatal.
+    fn save_peers(&self) {
+        if let Some(path) = &self.peers_path {
+            if let Err(error) = peers_file::save(path, &self.book) {
+                logging::warn(&format!("saving {} failed: {error}", path.display()));
             }
         }
     }
@@ -689,7 +784,10 @@ impl Node {
             }
             Event::Mined(block) => self.on_mined(&block),
             Event::TemplateRequest(reply) => {
-                let template = self.template()?;
+                let template = match self.mining_blocker()? {
+                    Some(blocker) => Err(blocker),
+                    None => Ok(self.template()?),
+                };
                 let _ = reply.send(template);
                 Ok(())
             }
@@ -753,6 +851,7 @@ impl Node {
                 last_getaddr: None,
                 addr_allowance: 0,
                 connected_at: std::time::Instant::now(),
+                claim_settled: false,
             },
         );
         self.apply_peer_events(id, events);
@@ -1026,6 +1125,7 @@ impl Node {
         let locator = locator(tip.height, |h| store.hash_at(h).ok().flatten());
         self.sync = BlockSync::new();
         self.sync_peer = Some(id);
+        self.sync_progress_at = now();
         log(&format!("syncing from peer {id} at height {}", tip.height));
         self.send(
             id,
@@ -1076,7 +1176,10 @@ impl Node {
         let store = self.chain.store();
         let known = |hash: &BlockHash| store.block(hash).ok().flatten().is_some();
         match self.sync.on_headers(headers, known) {
-            Ok(_) => self.continue_sync(id),
+            Ok(_) => {
+                self.sync_progress_at = now();
+                self.continue_sync(id);
+            }
             Err(_) => self.misbehave(id, 20, "bad headers"),
         }
     }
@@ -1107,6 +1210,7 @@ impl Node {
         if self.sync.is_idle() && self.sync.exhausted() {
             if let Some(id) = self.sync_peer.take() {
                 log(&format!("synced with peer {id}"));
+                self.settle_claim(id);
             }
         }
     }
@@ -1157,7 +1261,9 @@ impl Node {
     /// its consequences, and says what became of it.
     fn on_block(&mut self, from: Option<PeerId>, block: &Block) -> Result<Submission> {
         let hash = block.hash();
-        self.sync.on_block(&hash);
+        if self.sync.on_block(&hash) {
+            self.sync_progress_at = now();
+        }
         self.pending_blocks.remove(&hash);
         if let Some(id) = from {
             if let Some(handle) = self.peers.get_mut(&id) {
@@ -1399,6 +1505,49 @@ impl Node {
         Ok(count)
     }
 
+    /// Ready peers' handshake heights that still count; see
+    /// [`PeerHandle::claim_settled`].
+    fn claims(&self) -> impl Iterator<Item = (PeerId, u32)> + '_ {
+        self.peers.iter().filter_map(|(id, h)| {
+            let version = h.peer.version().filter(|_| h.peer.is_ready())?;
+            (!h.claim_settled).then_some((*id, version.best_height))
+        })
+    }
+
+    fn settle_claim(&mut self, id: PeerId) {
+        if let Some(handle) = self.peers.get_mut(&id) {
+            handle.claim_settled = true;
+        }
+    }
+
+    /// What keeps miners from working on the tip; see [`mining_blocker`].
+    fn mining_readiness(&self) -> Result<Option<NotReady>> {
+        let ready = self
+            .ready_peers(Direction::Inbound)
+            .saturating_add(self.ready_peers(Direction::Outbound));
+        Ok(mining_blocker(
+            self.network.mines_only_with_peers(),
+            ready,
+            self.sync_peer.is_some(),
+            self.chain.tip()?.height,
+            self.claims().map(|(_, height)| height),
+        ))
+    }
+
+    /// [`Self::mining_readiness`] for a template request, logged when it
+    /// changes so a waiting miner explains itself once.
+    fn mining_blocker(&mut self) -> Result<Option<NotReady>> {
+        let blocker = self.mining_readiness()?;
+        if blocker != self.mining_blocked {
+            match blocker {
+                Some(reason) => log(&format!("mining waits: {reason}")),
+                None => log("mining resumes: caught up with the network"),
+            }
+            self.mining_blocked = blocker;
+        }
+        Ok(blocker)
+    }
+
     fn ready_peers(&self, direction: Direction) -> usize {
         self.peers
             .values()
@@ -1416,6 +1565,7 @@ impl Node {
             blocks_mined_in_chain: self.mined_in_chain()?,
             pending_compact_blocks: self.pending_blocks.len(),
             uptime_seconds: now().saturating_sub(self.started_at),
+            mining_waits: self.mining_readiness()?,
         })
     }
 
@@ -1571,8 +1721,13 @@ impl Node {
             self.apply_peer_events(id, events);
         }
         if !self.sync.timeouts(now).is_empty() {
-            logging::warn("sync timed out, restarting");
-            self.sync_peer = None;
+            // Settled like a stall: a peer that sends headers but withholds
+            // blocks must not be picked again at once and hold the sync,
+            // and miners, forever.
+            logging::warn("sync timed out, trying another peer");
+            if let Some(id) = self.sync_peer.take() {
+                self.settle_claim(id);
+            }
             self.sync = BlockSync::new();
         }
         self.pending_blocks
@@ -1588,15 +1743,20 @@ impl Node {
             self.dandelion
                 .new_epoch(now, &inbound, &outbound, &mut self.rng);
         }
+        if let Some(id) = self.sync_peer {
+            if now.saturating_sub(self.sync_progress_at) >= SYNC_STALL_SECONDS {
+                logging::warn(&format!("sync with peer {id} stalled, trying another peer"));
+                self.settle_claim(id);
+                self.sync_peer = None;
+                self.sync = BlockSync::new();
+            }
+        }
         if self.sync_peer.is_none() {
             let ours = self.chain.tip().map_or(0, |t| t.height);
             let behind = self
-                .peers
-                .iter()
-                .find(|(_, h)| {
-                    h.peer.is_ready() && h.peer.version().is_some_and(|v| v.best_height > ours)
-                })
-                .map(|(id, _)| *id);
+                .claims()
+                .find(|(_, height)| *height > ours)
+                .map(|(id, _)| id);
             if let Some(id) = behind {
                 self.start_sync(id);
             }
@@ -1607,6 +1767,7 @@ impl Node {
         if self.ticks % EXCHANGE_SECONDS == 0 {
             self.refresh_addresses();
             self.book.prune(now);
+            self.save_peers();
         }
     }
 
@@ -1773,6 +1934,7 @@ impl Node {
                 })
             }
             Request::Metrics => Ok(Response::Metrics(Box::new(self.metrics()?))),
+            Request::MiningReadiness => Ok(Response::MiningReadiness(self.mining_readiness()?)),
             Request::BlockByHash(hash) => Ok(Response::Block(
                 self.chain.store().block(&hash)?.map(Box::new),
             )),
@@ -1913,6 +2075,39 @@ mod tests {
         height: 5,
         branch: BranchId::new(9),
     }];
+
+    #[test]
+    fn mining_waits_for_a_peer_where_needed_and_for_sync() {
+        let none = std::iter::empty;
+        assert_eq!(
+            mining_blocker(true, 0, false, 5, none()),
+            Some(NotReady::NoPeers)
+        );
+        assert_eq!(
+            mining_blocker(false, 0, false, 5, none()),
+            None,
+            "test network"
+        );
+        assert_eq!(mining_blocker(true, 1, false, 5, none()), None);
+        assert_eq!(
+            mining_blocker(true, 1, true, 5, none()),
+            Some(NotReady::Syncing)
+        );
+        assert_eq!(
+            mining_blocker(false, 0, true, 5, none()),
+            Some(NotReady::Syncing)
+        );
+        assert_eq!(
+            mining_blocker(true, 2, false, 5, [5, 6].into_iter()),
+            Some(NotReady::Syncing),
+            "a peer is ahead"
+        );
+        assert_eq!(
+            mining_blocker(true, 2, false, 5, [4, 5].into_iter()),
+            None,
+            "none ahead"
+        );
+    }
 
     #[test]
     fn dialed_targets_are_keyed_by_what_was_dialed_not_the_proxy() {

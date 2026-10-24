@@ -10,8 +10,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use null_chain::genesis::genesis;
-use null_desktop::backend::{Action, Backend, Config, OpenMode};
-use null_desktop::config::{Args, Mining, Startup};
+use null_desktop::backend::{Action, Backend, Config, OpenMode, Snapshot};
+use null_desktop::config::{Args, LogFile, Mining, Startup};
 use null_node::config::{Config as NodeConfig, Network};
 use null_node::jsonrpc::{Dispatch, Params, REJECTED};
 use null_node::rpc::Token;
@@ -67,6 +67,10 @@ async fn gui_and_http_share_one_wallet_and_lock_releases_its_database() {
         mining: Mining {
             enabled: false,
             threads: 1,
+        },
+        log: LogFile {
+            enabled: false,
+            path: directory.path().join("debug.log"),
         },
         settings: directory.path().join("null.conf"),
     });
@@ -245,6 +249,10 @@ async fn desktop_rejects_public_rpc_before_starting_a_node() {
             enabled: false,
             threads: 1,
         },
+        log: LogFile {
+            enabled: false,
+            path: directory.path().join("debug.log"),
+        },
         settings: directory.path().join("null.conf"),
     });
     assert!(backend.shutdown().await.is_err());
@@ -342,14 +350,15 @@ async fn automatic_setup_recognizes_the_wallet_after_restart_and_import_restores
     backend.shutdown().await.unwrap();
 }
 
-/// Waits until the published mining state satisfies `done`.
-async fn mining_until(backend: &mut Backend, done: impl Fn(&Value) -> bool) -> Value {
+/// Waits until the published snapshot satisfies `done`: an action's reply
+/// arrives before the snapshot it changed is published.
+async fn snapshot_until(backend: &mut Backend, done: impl Fn(&Snapshot) -> bool) -> Snapshot {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             {
-                let mining = backend.snapshots.borrow().mining.clone();
-                if done(&mining) {
-                    return mining;
+                let snapshot = backend.snapshots.borrow().clone();
+                if done(&snapshot) {
+                    return snapshot;
                 }
             }
             backend.snapshots.changed().await.unwrap();
@@ -357,6 +366,11 @@ async fn mining_until(backend: &mut Backend, done: impl Fn(&Value) -> bool) -> V
     })
     .await
     .unwrap()
+}
+
+/// Waits until the published mining state satisfies `done`.
+async fn mining_until(backend: &mut Backend, done: impl Fn(&Value) -> bool) -> Value {
+    snapshot_until(backend, |s| done(&s.mining)).await.mining
 }
 
 async fn set_mining(backend: &Backend, enabled: bool, threads: usize) -> Result<String, String> {
@@ -437,5 +451,70 @@ async fn mining_changes_answer_at_once_while_the_miner_is_busy() {
         );
     }
     mining_until(&mut backend, |m| m["active"] == false).await;
+    backend.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mainnet_miner_without_peers_reports_that_it_waits() {
+    // Every dial goes to a closed proxy port, so the node never gets a peer.
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let startup = Startup::load(&Args {
+        datadir: Some(dir.path().join("data")),
+        rpc: Some("127.0.0.1:0".parse().unwrap()),
+        proxy: Some(closed),
+        ..Args::default()
+    })
+    .unwrap();
+    let mut backend = Backend::spawn(startup.backend);
+    ready(&mut backend).await;
+    assert_eq!(backend.snapshots.borrow().mining["waiting"], "no peers yet");
+    open(&backend, OpenMode::Create).await;
+    set_mining(&backend, true, 1).await.unwrap();
+    let mining = mining_until(&mut backend, |m| m["active"] == true).await;
+    assert_eq!(mining["waiting"], "no peers yet");
+    assert_eq!(mining["found"], 0);
+    backend.shutdown().await.unwrap();
+}
+
+async fn set_log_file(backend: &Backend, enabled: bool) -> String {
+    backend
+        .client
+        .submit(Action::SetLogFile(enabled))
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap()
+        .message
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_log_file_switch_writes_the_log_and_is_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let startup = setup(&dir.path().join("data"));
+    let (config, log) = (startup.paths.config.clone(), startup.paths.log.clone());
+    let mut backend = Backend::spawn(startup.backend);
+    ready(&mut backend).await;
+    assert!(!backend.snapshots.borrow().log_file, "off by default");
+    assert!(!log.exists());
+
+    assert!(set_log_file(&backend, true).await.contains("debug.log"));
+    snapshot_until(&mut backend, |s| s.log_file).await;
+    null_node::logging::warn("log file switch test line");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains(" WARN   log file switch test line"), "{text}");
+    assert!(std::fs::read_to_string(&config)
+        .unwrap()
+        .contains("log_file = true"));
+
+    assert_eq!(set_log_file(&backend, false).await, "Log file off");
+    snapshot_until(&mut backend, |s| !s.log_file).await;
+    assert!(std::fs::read_to_string(&config)
+        .unwrap()
+        .contains("log_file = false"));
     backend.shutdown().await.unwrap();
 }

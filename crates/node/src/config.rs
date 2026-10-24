@@ -50,6 +50,16 @@ impl Network {
         }
     }
 
+    /// Whether mining waits for a connected peer. The test network mines
+    /// alone, as local tests and a fresh test chain need; on mainnet a node
+    /// without peers cannot know whether its tip is current.
+    pub fn mines_only_with_peers(self) -> bool {
+        match self {
+            Self::Main => true,
+            Self::Test => false,
+        }
+    }
+
     /// How this network's addresses are written.
     pub fn address_prefix(self) -> AddressPrefix {
         self.params().address_prefix

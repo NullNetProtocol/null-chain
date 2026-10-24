@@ -28,12 +28,13 @@ impl Form {
         let mining = &state.mining;
         let unlocked = state.wallet.is_some();
         let active = field(mining, "active").as_bool() == Some(true);
+        let waiting = field(mining, "waiting").as_str();
         let saved = saved_threads(mining);
         let max = usize_field(mining, "max_threads").unwrap_or(1).max(1);
         widgets::card(ui, |ui| {
             ui.horizontal(|ui| {
                 widgets::card_title(ui, "Mining");
-                let (label, tone) = status(unlocked, active);
+                let (label, tone) = status(unlocked, active, waiting.is_some());
                 widgets::badge(ui, label, tone);
             });
             if !unlocked {
@@ -41,6 +42,9 @@ impl Form {
                     ui,
                     "Unlock your wallet to mine. Rewards go to its main address.",
                 );
+            }
+            if let Some(reason) = waiting.filter(|_| active) {
+                widgets::caption(ui, &waiting_caption(reason));
             }
             let mut effect = None;
             ui.horizontal(|ui| {
@@ -75,13 +79,23 @@ fn request(enabled: bool, threads: usize) -> Effect {
     Effect::Submit(Action::SetMining(Mining { enabled, threads }))
 }
 
-/// The badge for the miner's state.
-fn status(unlocked: bool, active: bool) -> (&'static str, Tone) {
-    match (unlocked, active) {
-        (false, _) => ("Locked", Tone::Neutral),
-        (true, true) => ("Mining", Tone::Success),
-        (true, false) => ("Off", Tone::Neutral),
+/// The badge for the miner's state. A running miner waits, using no CPU,
+/// while the node has no peers or is catching up.
+fn status(unlocked: bool, active: bool, waiting: bool) -> (&'static str, Tone) {
+    match (unlocked, active, waiting) {
+        (false, _, _) => ("Locked", Tone::Neutral),
+        (true, true, true) => ("Waiting for sync", Tone::Warning),
+        (true, true, false) => ("Mining", Tone::Success),
+        (true, false, _) => ("Off", Tone::Neutral),
     }
+}
+
+/// Why a switched-on miner is idle, as the node reports it.
+fn waiting_caption(reason: &str) -> String {
+    format!(
+        "Waiting for sync: {reason}. Mining starts by itself once the node is caught up; \
+         blocks found on an old tip would only be discarded."
+    )
 }
 
 /// The saved thread count, at least one.
@@ -146,10 +160,25 @@ mod tests {
     }
 
     #[test]
-    fn the_badge_follows_lock_and_miner_state() {
-        assert_eq!(status(false, true).0, "Locked");
-        assert_eq!(status(true, true), ("Mining", Tone::Success));
-        assert_eq!(status(true, false).0, "Off");
+    fn the_badge_follows_lock_miner_and_sync_state() {
+        assert_eq!(status(false, true, false).0, "Locked");
+        assert_eq!(status(false, true, true).0, "Locked");
+        assert_eq!(status(true, true, false), ("Mining", Tone::Success));
+        assert_eq!(
+            status(true, true, true),
+            ("Waiting for sync", Tone::Warning)
+        );
+        assert_eq!(status(true, false, false).0, "Off");
+        assert_eq!(
+            status(true, false, true).0,
+            "Off",
+            "an idle node is not news"
+        );
+    }
+
+    #[test]
+    fn the_waiting_caption_names_the_reason() {
+        assert!(waiting_caption("no peers yet").starts_with("Waiting for sync: no peers yet."));
     }
 
     #[test]

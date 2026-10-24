@@ -29,7 +29,9 @@ rpc getmininginfo '[]'
 ```
 
 `getmininginfo` reports `syncing`; the node refuses templates while it
-is true. `--blocknotify` is optional: it runs a shell command with `%s`
+is true, and also on mainnet while it has no peer or a peer reports a
+longer chain than it has (`not ready to mine: …`, code -2). Retry
+until it answers. `--blocknotify` is optional: it runs a shell command with `%s`
 replaced by the hash of every new tip, for pools that prefer a hook to
 long polling. `work_per_second` is a coarse network-rate estimate from
 block timestamps, like Bitcoin's `networkhashps`.

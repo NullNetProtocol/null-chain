@@ -1224,3 +1224,82 @@ UPnP/NAT-PMP, external-IP services, persistent address books and onion/I2P
 address gossip remain future work. Integration tests cover introductions
 through a seed, discovery after an observer has connected, full seeds,
 unverified TCP endpoints, repeated exchange and a forwarded-port override.
+
+## 2026-10-22: Persistent address book, log files
+
+Restarting the five seeds for 0.1.6 emptied their address books: the book
+lived in memory only, so every verified listener had to be rediscovered and
+reverified (one probe at a time, ten-minute exchanges) before a seed could
+share it again.
+
+Alternatives for the book: a table in `chain.redb`; Bitcoin-style
+`peers.dat`; no persistence. Chosen: `peers.dat` beside the chain, written
+through a canonical `addrbook::Snapshot` (version byte, bounded count,
+strictly ascending entries, rejects garbage). It is not chain data, so it
+stays out of the chain store and its rules digest, and a corrupt file is
+ignored with a warning instead of blocking startup. The disk is treated as
+adversarial: loading re-applies the gossip rules (age, future timestamps,
+size bound, mainnet's public-address policy), and a verification time in
+the future is dropped. Verification times are kept, which is the point:
+a restarted seed can share listeners it verified in the last 24 hours at
+once. Failure counts, retry delays and bans are not kept; a restart still
+forgives them, as before (TODO item). The file is saved every exchange
+period and on shutdown, via a temporary file and rename, owner-only.
+
+Privacy: the file records which endpoints this node reached. For a direct
+node that is the same information its peers already see, but a node behind
+Tor or I2P must not leave such a record, so `--proxy`/`--i2p` nodes keep no
+file (they also announce nothing).
+
+Log files: `--log-file <path>` appends every log line, dated in UTC and
+uncolored, owner-only. Alternatives were shell redirection (no dates in
+the lines, and desktop users have no shell to redirect) or a logging
+framework (a dependency for one file). `nulld` leaves rotation
+to logrotate. The desktop app has a switch instead of a default-on file:
+the log names peer IPs and transaction ids, which a shielded wallet should
+not write to disk unless the user asks, and it rotates past 10 MiB at start
+since desktop users have no logrotate.
+
+## 2026-10-24: Mining waits until the node is caught up
+
+Before, the built-in miner (`nulld --mine`, the desktop switch) asked for
+work as soon as it started and got a template on whatever tip the node
+had, mid-sync or before any peer connected; only `getblocktemplate`
+checked for a running sync. A block found that way sits below the
+network's tip and is discarded, so the CPU time is wasted and the miner
+looks busy while doing nothing useful.
+
+Chosen: one rule in the node loop, applied to every template request, so
+the built-in miner and pools behave alike. Work is refused while a sync
+runs, while a ready peer's handshake height is above our tip and not yet
+settled, and on mainnet while no peer is ready. Miners retry every
+second and the node logs the reason once per change.
+
+The test network mines without peers: local tests and a fresh test chain
+start from one node. Mainnet does not: a node with no peers cannot tell a
+current tip from a stale one. Alternatives were Bitcoin's
+initial-block-download heuristic (tip younger than a day), which says
+nothing about a node that was offline for an hour, and a flag to mine
+alone on mainnet, which no current use needs.
+
+A peer's handshake height is a claim, so it must not stall mining
+forever: it is settled once a sync from that peer runs out of headers,
+and a sync with no new header or block for 120 seconds is abandoned and
+its peer's claim settled too. The tick that looks for a peer to sync from
+skips settled claims, which also stops it from restarting a sync with a
+peer that over-reported its height every second.
+
+The reason is also reported, without logging, through `Request::Metrics`:
+the desktop Mining card shows "Waiting for sync" and the reason instead of
+"Mining" while the switch is on, and `/metrics` exports it as
+`null_mining_ready` (1 or 0) so a seed that cannot mine shows up in
+monitoring.
+
+Review follow-ups (same day): a block request that times out now settles
+its sync peer's claim as a stall does, since the 60-second block timeout
+ended the sync before the 120-second stall check could and the same peer
+was picked again at once. `getblocktemplate` checks readiness before its
+template cache, so a cached template is not served after the last mainnet
+peer leaves (regression test in `tests/mining.rs`). And `--log-file` makes
+an existing file owner-only on open, not only a new one: the 0600 creation
+mode does not touch a file that already exists with broader permissions.

@@ -212,3 +212,73 @@ async fn a_pool_mines_through_templates_and_submissions() {
 
     node.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mainnet_node_hands_out_work_only_while_it_has_a_peer() {
+    let mut rng = ChaCha20Rng::seed_from_u64(22);
+    let keys = WalletKeys::from_spending_key(SpendingKey::random(&mut rng)).unwrap();
+    let payout = keys
+        .default_address()
+        .unwrap()
+        .encode(Network::Main.address_prefix());
+    let token = Token::new("pool").unwrap();
+    let node = spawn(Config {
+        network: Network::Main,
+        rpc_http: Some("127.0.0.1:0".parse().unwrap()),
+        rpc_token: Some(token.clone()),
+        ..Config::test()
+    })
+    .await
+    .unwrap();
+    let addr = node.rpc_http_addr.unwrap();
+    let body = json!({"jsonrpc": "2.0", "method": "getblocktemplate", "params": [payout], "id": 1});
+    let reply = post(addr, token.expose(), &body.to_string()).await;
+    assert_eq!(reply["error"]["code"], REJECTED, "{reply}");
+    assert_eq!(reply["error"]["message"], "not ready to mine: no peers yet");
+
+    // With a peer it hands out work; once the peer is gone, not even the
+    // cached template is served.
+    let peer = spawn(Config {
+        network: Network::Main,
+        listen: Some("127.0.0.1:0".parse().unwrap()),
+        ..Config::test()
+    })
+    .await
+    .unwrap();
+    let node = spawn(Config {
+        network: Network::Main,
+        connect: vec![peer.listen_addr.unwrap().to_string()],
+        rpc_http: Some("127.0.0.1:0".parse().unwrap()),
+        rpc_token: Some(token.clone()),
+        ..Config::test()
+    })
+    .await
+    .unwrap();
+    let addr = node.rpc_http_addr.unwrap();
+    let t = token.expose();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let reply = post(addr, t, &body.to_string()).await;
+        if reply["error"].is_null() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never ready: {reply}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    peer.shutdown().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while call(addr, t, "getpeerinfo", json!([])).await != json!([]) {
+        assert!(tokio::time::Instant::now() < deadline, "peer never left");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Within the template cache's reuse window, so a cache hit would pass.
+    let reply = post(addr, t, &body.to_string()).await;
+    assert_eq!(
+        reply["error"]["message"], "not ready to mine: no peers yet",
+        "{reply}"
+    );
+    node.shutdown().await;
+}

@@ -40,6 +40,10 @@ Defaults:
   available port, shown on the Node screen.
 - RPC token: `desktop-rpc.token` inside the network data directory,
   regenerated on startup, owner-only permissions on Unix.
+- Address book: `<network>/chain/peers.dat`, so reachable nodes found
+  through discovery are remembered across restarts. Not written with a
+  proxy configured.
+- Log file: `<network>/debug.log`, only when switched on (see below).
 - P2P: outbound connections only unless `--listen` is supplied.
 - SOCKS5: `--proxy <host:port>`; this connects to an existing proxy.
 
@@ -66,6 +70,7 @@ connect = ["127.0.0.1:19000"]
 lock_after_minutes = 15
 mine = false
 mining_threads = 4
+log_file = false
 # listen = "127.0.0.1:18445"
 # advertise = "<PUBLIC_IP>:19000"
 # proxy = "127.0.0.1:9050"
@@ -138,6 +143,9 @@ a backend request is running or the recovery phrase is on screen. It is
 also skipped while the miner runs, because locking would stop mining; the
 timeout starts again once mining stops. Lock by hand to stop both.
 
+The sidebar shows the build's release, `v` plus the workspace version
+(`v0.1.6`), under the wallet and network badges on every page.
+
 ## Mining
 
 The Node page has a Mining card with an on/off switch and a thread slider
@@ -151,10 +159,27 @@ network) and happens in the background, so the switch answers at once.
 Workers also drop their template as soon as the best tip moves, instead of
 grinding on a block that could only become a side-chain block.
 
+The switch can be on before the node is ready: the miner then waits, using
+no CPU, until the node has a peer (on mainnet) and has caught up with the
+network. The card's badge reads **Waiting for sync** with the reason (no
+peers yet, or catching up with the network), and the log says
+`mining waits: …` and later `mining resumes`. A
+block mined on an old tip would only be discarded once the node caught up.
+
 The switch saves `mine` and `mining_threads` to `null.conf` in place;
 other settings and comments are kept. The first start builds the coinbase
 proving key, which takes a few seconds. The card shows the payout address
 and how many blocks this session found and how many are in the main chain.
+
+## Log file
+
+The **Log file** card on the Node page writes the node log to
+`<network>/debug.log`, the same lines `nulld` prints, dated in UTC. It
+applies at once and is saved as `log_file` in `null.conf`. It is off by
+default because the log lists peer addresses and transaction ids, which a
+privacy wallet should not leave on disk unless asked; switch it on when
+reporting a problem. A log over 10 MiB is moved to `debug.log.1`
+(replacing the older one) when logging starts.
 
 ## RPC
 

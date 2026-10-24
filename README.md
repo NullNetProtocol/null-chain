@@ -56,8 +56,9 @@ one per-user data directory:
 | Windows | `%LOCALAPPDATA%\Null`, else `%APPDATA%\Null`          |
 
 Inside it, each network has its own directory: `<network>/chain/` holds
-the node's `chain.redb` and `rpc.token`, and `<network>/wallet.redb` is the
-default wallet. So `nulld run` uses the same chain as the desktop app, and
+the node's `chain.redb`, `rpc.token` and `peers.dat` (the address book, so
+a restart keeps the reachable nodes it verified), and `<network>/wallet.redb`
+is the default wallet. So `nulld run` uses the same chain as the desktop app, and
 `null-wallet-rpc` finds the desktop wallet and the node token by itself.
 Only one process can open a database at a time. `nulld run --datadir <dir>`
 points the node elsewhere, and `--in-memory` keeps the chain in memory.
@@ -86,6 +87,9 @@ macOS builds need Apple's SDK, which in practice means a Mac. Pushing a
 tag like `v0.1.0` runs `.github/workflows/release.yml`, which builds all
 platforms on native runners (Linux, Windows, and macOS on both Apple
 silicon and Intel) with the same script and publishes a GitHub release.
+The tag must match the workspace version in `Cargo.toml` (`v0.1.6` for
+`0.1.6`), or the workflow fails: the desktop app shows that version as its
+release.
 Running the workflow by hand builds the archives without publishing.
 Binaries are not code-signed yet.
 
@@ -147,7 +151,10 @@ can discover these listeners while remaining outbound-only.
 
 Each node logs with a level and a timestamp — `21:17:47 INFO  mined block 1 …` —
 colored when the output is a terminal (set `NO_COLOR` or pipe it to disable);
-`--log-level debug|info|warn|error` sets the threshold. `--metrics 127.0.0.1:9100` serves
+`--log-level debug|info|warn|error` sets the threshold, and `--log-file debug.log`
+also appends every line to a file, dated (`2026-10-22 08:36:10 INFO  …`, UTC)
+and uncolored, owner-only on Unix. `nulld` does not rotate it; use logrotate
+with `copytruncate` for long-running nodes. `--metrics 127.0.0.1:9100` serves
 Prometheus metrics at `/metrics`: height, peers, mempool, blocks mined
 against blocks still in the chain, and uptime. The status line carries
 the same mined and in-chain counts. The control socket speaks one

@@ -33,6 +33,9 @@ pub enum Error {
     /// A header sequence does not chain.
     #[error("headers do not chain: {0}")]
     BadHeaders(&'static str),
+    /// A saved address book does not decode.
+    #[error("bad address book snapshot: {0}")]
+    BadSnapshot(&'static str),
 }
 
 impl From<snow::Error> for Error {

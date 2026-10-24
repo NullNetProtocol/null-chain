@@ -126,6 +126,9 @@ pub struct Args {
     /// Log level: debug, info, warn or error.
     #[arg(long, default_value = "info")]
     pub log_level: logging::Level,
+    /// Also append log lines to this file, dated and without colors.
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
 }
 
 /// Everything the daemon needs to start.
@@ -276,7 +279,7 @@ fn node_token(text: Option<String>, file: Option<PathBuf>, network: Network) -> 
 /// # Errors
 /// Fails if the wallet cannot be opened or a socket bound.
 pub async fn main(args: Args) -> Result<()> {
-    logging::set_level(args.log_level);
+    logging::init(args.log_level, args.log_file.as_deref())?;
     let node = Endpoint {
         addr: args.node,
         token: node_token(args.node_token, args.node_token_file, args.network)?,

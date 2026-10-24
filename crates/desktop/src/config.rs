@@ -1,7 +1,7 @@
 //! Persistent desktop settings and automatic application storage.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use null_node::config::{Config as NodeConfig, Network};
-use null_node::paths::{self, private_directory};
+use null_node::paths::{self, create_private, private_directory, write_private};
 use null_node::{Error, Result};
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +60,8 @@ pub struct Paths {
     pub config: PathBuf,
     /// Wallet selected automatically for this launch.
     pub wallet: PathBuf,
+    /// Where the log is written when the log file is switched on.
+    pub log: PathBuf,
 }
 
 /// Validated settings and initialized directories for one desktop launch.
@@ -103,22 +105,83 @@ fn default_mining_threads() -> usize {
 }
 
 /// Saves the mining settings into the configuration at `path`, keeping
-/// every other setting and comment as it is. The file is replaced
-/// atomically and stays owner-only on Unix.
+/// every other setting and comment as it is.
 ///
 /// # Errors
 /// Fails if the file cannot be read, parsed, or written.
 pub fn save_mining(path: &Path, mining: Mining) -> Result<()> {
+    edit_settings(path, |document| {
+        document.insert("mine", toml_edit::value(mining.enabled));
+        let threads = i64::try_from(mining.threads).unwrap_or(i64::MAX);
+        document.insert("mining_threads", toml_edit::value(threads));
+    })
+}
+
+/// Saves the log file switch into the configuration at `path`, keeping
+/// every other setting and comment as it is.
+///
+/// # Errors
+/// Fails if the file cannot be read, parsed, or written.
+pub fn save_log_file(path: &Path, enabled: bool) -> Result<()> {
+    edit_settings(path, |document| {
+        document.insert("log_file", toml_edit::value(enabled));
+    })
+}
+
+/// Applies `edit` to the configuration at `path`. The file is replaced
+/// atomically and stays owner-only on Unix.
+fn edit_settings(path: &Path, edit: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<()> {
     let text = fs::read_to_string(path)?;
     let mut document: toml_edit::DocumentMut = text
         .parse()
         .map_err(|error| Error::Argument(format!("cannot edit {}: {error}", path.display())))?;
-    document.insert("mine", toml_edit::value(mining.enabled));
-    let threads = i64::try_from(mining.threads).unwrap_or(i64::MAX);
-    document.insert("mining_threads", toml_edit::value(threads));
+    edit(&mut document);
     let temporary = path.with_extension("conf.tmp");
     write_private(&temporary, document.to_string().as_bytes())?;
     fs::rename(&temporary, path)?;
+    Ok(())
+}
+
+/// Log file name in a network directory.
+pub const LOG_FILE: &str = "debug.log";
+/// Size above which an existing log moves to `debug.log.1` when logging
+/// starts, replacing the previous old log, so the file cannot grow forever.
+pub const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
+/// The optional log file, off unless the user switches it on: its lines
+/// name peer addresses and transaction ids.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogFile {
+    /// Whether the log is written.
+    pub enabled: bool,
+    /// `debug.log` in the network directory.
+    pub path: PathBuf,
+}
+
+impl LogFile {
+    /// Starts writing the log, first moving a log larger than
+    /// [`MAX_LOG_BYTES`] aside, or stops writing it.
+    ///
+    /// # Errors
+    /// Fails if the old log cannot be moved or the file opened.
+    pub fn apply(&self) -> Result<()> {
+        if !self.enabled {
+            null_node::logging::clear_file();
+            return Ok(());
+        }
+        rotate_log(&self.path, MAX_LOG_BYTES)?;
+        null_node::logging::set_file(&self.path)?;
+        Ok(())
+    }
+}
+
+/// Moves `path` to `<path>.1` when it is larger than `max_bytes`.
+fn rotate_log(path: &Path, max_bytes: u64) -> Result<()> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.len() > max_bytes => fs::rename(path, path.with_extension("log.1"))?,
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
     Ok(())
 }
 
@@ -144,6 +207,8 @@ struct Settings {
     mine: bool,
     /// Mining worker threads.
     mining_threads: usize,
+    /// Append the log to `debug.log` in the network directory.
+    log_file: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     wallets: BTreeMap<String, PathBuf>,
 }
@@ -161,6 +226,7 @@ impl Default for Settings {
             lock_after_minutes: DEFAULT_LOCK_MINUTES,
             mine: false,
             mining_threads: default_mining_threads(),
+            log_file: false,
             wallets: BTreeMap::new(),
         }
     }
@@ -288,6 +354,10 @@ impl Startup {
         }
         let lock_after = settings.lock_after();
         let mining = settings.mining();
+        let log = LogFile {
+            enabled: settings.log_file,
+            path: network_dir.join(LOG_FILE),
+        };
         Ok(Self {
             backend: backend::Config {
                 node,
@@ -295,12 +365,14 @@ impl Startup {
                 token_file: network_dir.join("desktop-rpc.token"),
                 wallet: wallet.clone(),
                 mining,
+                log: log.clone(),
                 settings: config.clone(),
             },
             paths: Paths {
                 data,
                 config,
                 wallet,
+                log: log.path,
             },
             lock_after,
         })
@@ -317,30 +389,6 @@ fn read_settings(path: &Path) -> Result<(Settings, bool)> {
         }
         Err(error) => Err(error.into()),
     }
-}
-
-/// Creates `path`, failing if it exists, owner-only on Unix.
-fn create_private(path: &Path) -> Result<fs::File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    Ok(options.open(path)?)
-}
-
-/// Writes `bytes` to a new owner-only file at `path`, replacing a stale one.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-        _ => {}
-    }
-    let mut file = create_private(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
 }
 
 fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
@@ -616,6 +664,43 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert!(save_mining(&dir.path().join("missing.conf"), mining).is_err());
+    }
+
+    #[test]
+    fn the_log_file_is_off_by_default_and_saved_in_place() {
+        assert!(!Settings::default().log_file, "logging to disk is opt-in");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("null.conf");
+        fs::write(&path, "# keep me\nnetwork = \"main\"\n").unwrap();
+        save_log_file(&path, true).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("# keep me\nnetwork = \"main\"\n"),
+            "{text}"
+        );
+        assert!(read_settings(&path).unwrap().0.log_file);
+        save_log_file(&path, false).unwrap();
+        assert!(!read_settings(&path).unwrap().0.log_file);
+        assert!(save_log_file(&dir.path().join("missing.conf"), true).is_err());
+    }
+
+    #[test]
+    fn large_logs_move_aside_and_small_ones_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG_FILE);
+        rotate_log(&path, 4).unwrap();
+        assert!(!path.exists(), "a missing log is fine");
+        fs::write(&path, "1234").unwrap();
+        rotate_log(&path, 4).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1234");
+        fs::write(&path, "12345").unwrap();
+        fs::write(dir.path().join("debug.log.1"), "older").unwrap();
+        rotate_log(&path, 4).unwrap();
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("debug.log.1")).unwrap(),
+            "12345"
+        );
     }
 
     #[test]

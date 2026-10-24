@@ -7,6 +7,7 @@
 //!   <network>/                 see [`network_dir`]
 //!     chain/chain.redb         the node's datadir, see [`chain_dir`]
 //!     chain/rpc.token          the node's control token
+//!     chain/peers.dat          the node's saved address book
 //!     wallet.redb              see [`wallet_file`]
 //!     wallet-rpc.token         null-wallet-rpc's token
 //! ```
@@ -15,11 +16,68 @@
 //! using the same network directory cannot run at the same time.
 
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::config::Network;
 use crate::{Error, Result};
+
+/// Open options whose newly created files are readable by the owner only
+/// on Unix, from the moment they exist. Add the access mode to taste.
+pub fn private_open_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+/// Makes an already open file owner-only on Unix, for files that may have
+/// existed with broader permissions before [`private_open_options`] could
+/// apply; a no-op elsewhere.
+///
+/// # Errors
+/// Fails if the permissions cannot be changed.
+pub fn restrict(file: &File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    Ok(())
+}
+
+/// Creates `path` for writing, failing if it exists, owner-only on Unix.
+///
+/// # Errors
+/// Fails if the file exists or cannot be created.
+pub fn create_private(path: &Path) -> Result<File> {
+    Ok(private_open_options()
+        .write(true)
+        .create_new(true)
+        .open(path)?)
+}
+
+/// Writes `bytes` to a new owner-only file at `path`, replacing a stale one,
+/// and syncs it: tokens, settings and address books are private to the user.
+///
+/// # Errors
+/// Fails if the old file cannot be removed or the new one written.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let mut file = create_private(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
 
 /// Subdirectory of a network directory holding the node's chain and token.
 pub const CHAIN_DIR: &str = "chain";
@@ -134,6 +192,21 @@ pub fn private_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_files_are_replaced_and_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        write_private(&path, b"first").unwrap();
+        write_private(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
 
     #[test]
     fn default_storage_requires_a_user_location_instead_of_using_the_working_directory() {

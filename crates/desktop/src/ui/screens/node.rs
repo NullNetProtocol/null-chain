@@ -1,7 +1,7 @@
 //! Embedded node status, local RPC, and storage locations.
 
 use eframe::egui::{self, Ui};
-use null_desktop::backend::Snapshot;
+use null_desktop::backend::{Action, Snapshot};
 use null_desktop::config::Paths;
 use serde_json::Value;
 
@@ -10,7 +10,8 @@ use crate::ui::format::{field, number, text};
 use crate::ui::theme::Tone;
 use crate::ui::widgets;
 
-/// Draws node status and the mining card, whose switch is its only action.
+/// Draws node status, the mining card and the log file switch, the page's
+/// only actions.
 pub fn show(
     ui: &mut Ui,
     state: &Snapshot,
@@ -33,7 +34,8 @@ pub fn show(
                 widgets::stat(height, "Height", &number(&state.node, "height"));
                 widgets::stat(connected, "Peers", &peers.to_string());
             });
-            let effect = mining.show(ui, state);
+            let mining_effect = mining.show(ui, state);
+            let log_effect = log_file(ui, state.log_file, paths);
             widgets::card(ui, |ui| {
                 widgets::card_title(ui, "Best block");
                 widgets::copyable(ui, text(&state.node, "best_block_hash"));
@@ -43,9 +45,38 @@ pub fn show(
                 }
             });
             widgets::card(ui, |ui| storage(ui, paths));
-            effect
+            mining_effect.or(log_effect)
         },
     )
+}
+
+/// The log file switch. Off by default: the log names peers and
+/// transaction ids, which a privacy wallet should not leave on disk
+/// unless asked to.
+fn log_file(ui: &mut Ui, on: bool, paths: &Paths) -> Option<Effect> {
+    widgets::card(ui, |ui| {
+        widgets::card_title(ui, "Log file");
+        let mut effect = None;
+        ui.horizontal(|ui| {
+            if widgets::toggle(ui, on, true).clicked() {
+                effect = Some(log_request(!on));
+            }
+            ui.label("Write the node log to a file");
+        });
+        widgets::copyable(ui, &paths.log.display().to_string());
+        widgets::caption(
+            ui,
+            "Useful when reporting a problem. The log lists the addresses of \
+             peers and the ids of transactions, so it stays off unless you \
+             switch it on. Logs over 10 MiB move to debug.log.1 at start.",
+        );
+        effect
+    })
+}
+
+/// A request to switch the log file on or off.
+fn log_request(enabled: bool) -> Effect {
+    Effect::Submit(Action::SetLogFile(enabled))
 }
 
 fn storage(ui: &mut Ui, paths: &Paths) {
@@ -54,6 +85,7 @@ fn storage(ui: &mut Ui, paths: &Paths) {
             ("Data directory", &paths.data),
             ("Configuration", &paths.config),
             ("Wallet", &paths.wallet),
+            ("Log file", &paths.log),
         ] {
             widgets::field_label(ui, label, None);
             widgets::copyable(ui, &path.display().to_string());
@@ -93,6 +125,16 @@ mod tests {
         assert_eq!(health(&json!({ "syncing": true }), 0).0, Tone::Warning);
         assert!(health(&json!({}), 0).1.contains("peers"));
         assert_eq!(health(&json!({ "syncing": false }), 2).0, Tone::Success);
+    }
+
+    #[test]
+    fn the_log_switch_requests_the_new_state() {
+        for enabled in [true, false] {
+            let Effect::Submit(Action::SetLogFile(asked)) = log_request(enabled) else {
+                panic!("not a log request");
+            };
+            assert_eq!(asked, enabled);
+        }
     }
 
     #[test]

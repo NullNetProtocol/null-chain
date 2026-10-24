@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 
+use null_protocol::bytes::{Reader, Writer};
 use rand_core::RngCore;
 
-use crate::message::{PeerAddr, MAX_ADDRESSES};
+use crate::message::{put_count, take_count, PeerAddr, MAX_ADDRESSES};
+use crate::{Error, Result};
 
 /// Addresses the book keeps at most.
 pub const MAX_KNOWN: usize = 10_000;
@@ -32,6 +34,8 @@ pub const SHARED_TIME_GRANULARITY: u64 = 60 * 60;
 
 /// An IP address as the book stores it: IPv4 as IPv4-mapped IPv6.
 pub type Ip = [u8; 16];
+/// Version byte of the [`Snapshot`] layout.
+pub const SNAPSHOT_VERSION: u8 = 1;
 
 #[derive(Clone, Copy, Debug)]
 struct Entry {
@@ -251,6 +255,123 @@ impl AddressBook {
             .retain(|_, e| now.saturating_sub(e.addr.last_seen) <= MAX_AGE);
         self.bans.retain(|_, until| *until > now);
     }
+
+    /// The addresses worth keeping across a restart, in canonical order.
+    pub fn snapshot(&self) -> Snapshot {
+        let mut entries: Vec<SavedAddr> = self
+            .entries
+            .values()
+            .map(|e| SavedAddr {
+                addr: e.addr,
+                verified_at: e.verified_at,
+            })
+            .collect();
+        entries.sort_by_key(|e| e.addr.key());
+        Snapshot(entries)
+    }
+
+    /// Loads saved addresses under the same rules as gossip: `keep` applies
+    /// the caller's network policy, [`AddressBook::add`] the timestamp
+    /// checks and the size bound, and known addresses stay as they are. A
+    /// verification time in the future is dropped, not trusted, since the
+    /// file may have been written by anyone. Returns how many were added.
+    pub fn restore(
+        &mut self,
+        snapshot: Snapshot,
+        now: u64,
+        keep: impl Fn(&PeerAddr) -> bool,
+    ) -> usize {
+        let mut added: usize = 0;
+        for saved in snapshot.0.into_iter().filter(|s| keep(&s.addr)) {
+            if !self.add(saved.addr, now) {
+                continue;
+            }
+            if let Some(e) = self.entries.get_mut(&saved.addr.key()) {
+                e.verified_at = saved.verified_at.filter(|at| *at <= now);
+            }
+            added = added.saturating_add(1);
+        }
+        added
+    }
+}
+
+/// One saved address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SavedAddr {
+    /// The address and when it was last seen alive.
+    pub addr: PeerAddr,
+    /// When an outbound handshake last verified it, if one did.
+    pub verified_at: Option<u64>,
+}
+
+/// The part of an [`AddressBook`] that survives a restart: addresses and
+/// their verification times. Failure counts, retry delays and bans are not
+/// kept, so a restart still gives every address a fresh start.
+///
+/// Layout: [`SNAPSHOT_VERSION`], a `u32` LE count of at most [`MAX_KNOWN`],
+/// then per entry, in strictly ascending `(ip, port)` order,
+/// `ip (16) | port (u16 LE) | last_seen (u64 LE) | verified (0 or 1)`
+/// followed by `verified_at (u64 LE)` when the flag is 1.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Snapshot(Vec<SavedAddr>);
+
+impl Snapshot {
+    /// The saved addresses, in ascending `(ip, port)` order.
+    pub fn entries(&self) -> &[SavedAddr] {
+        &self.0
+    }
+
+    /// The canonical encoding.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut w = Writer::default();
+        w.put_u8(SNAPSHOT_VERSION);
+        put_count(&mut w, self.0.len());
+        for saved in &self.0 {
+            saved.addr.write(&mut w);
+            match saved.verified_at {
+                Some(at) => w.put_u8(1).put_u64_le(at),
+                None => w.put_u8(0),
+            };
+        }
+        w.into_bytes()
+    }
+
+    /// Decodes [`Snapshot::to_bytes`].
+    ///
+    /// # Errors
+    /// Fails on another version, more than [`MAX_KNOWN`] entries, entries
+    /// out of order or repeated, a flag other than 0 or 1, truncation or
+    /// trailing bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(bytes);
+        if r.take_u8()? != SNAPSHOT_VERSION {
+            return Err(Error::BadSnapshot("unknown version"));
+        }
+        let count = take_count(&mut r, MAX_KNOWN, "saved addresses")?;
+        let mut entries: Vec<SavedAddr> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let saved = read_saved(&mut r)?;
+            if entries
+                .last()
+                .is_some_and(|prev| prev.addr.key() >= saved.addr.key())
+            {
+                return Err(Error::BadSnapshot("addresses not strictly ascending"));
+            }
+            entries.push(saved);
+        }
+        r.finish()?;
+        Ok(Self(entries))
+    }
+}
+
+fn read_saved(r: &mut Reader<'_>) -> Result<SavedAddr> {
+    let addr = PeerAddr::read(r)?;
+    let verified_at = match r.take_u8()? {
+        0 => None,
+        1 => Some(r.take_u64_le()?),
+        _ => return Err(Error::BadSnapshot("verified flag is not 0 or 1")),
+    };
+    Ok(SavedAddr { addr, verified_at })
 }
 
 #[cfg(test)]
@@ -389,20 +510,18 @@ mod tests {
         let mut book = AddressBook::new();
         let mut rng = ChaCha20Rng::seed_from_u64(5);
         book.add(addr(1, 100), 100);
-        assert!(book.sample(100, 100, &mut rng).is_empty());
+        assert_eq!(book.sample(100, 100, &mut rng).len(), 0);
         book.connected(addr(1, 100).key(), 100);
         assert!(book.unverified_candidate(&[], 100, &mut rng).is_none());
         book.add(addr(1, 200), 200);
         assert_eq!(book.sample(100, 200, &mut rng), vec![addr(1, 0)]);
-        assert!(book
-            .sample(100, 100 + VERIFIED_SECONDS, &mut rng)
-            .is_empty());
+        assert_eq!(book.sample(100, 100 + VERIFIED_SECONDS, &mut rng).len(), 0);
         assert!(book
             .unverified_candidate(&[], 100 + VERIFIED_SECONDS, &mut rng)
             .is_some());
         book.connected(addr(1, 100).key(), 300);
         book.failed(addr(1, 100).key());
-        assert!(book.sample(100, 300, &mut rng).is_empty());
+        assert_eq!(book.sample(100, 300, &mut rng).len(), 0);
     }
 
     #[test]
@@ -449,5 +568,95 @@ mod tests {
         book.attempted(a.key(), 160);
         assert!(book.candidate(&[], 279, &mut rng).is_none());
         assert!(book.candidate(&[], 280, &mut rng).is_some());
+    }
+
+    fn saved_book() -> AddressBook {
+        let mut book = AddressBook::new();
+        book.add(addr(3, 100), 100);
+        book.add(addr(1, 100), 100);
+        book.add(addr(2, 100), 100);
+        book.connected(addr(2, 0).key(), 150);
+        book
+    }
+
+    #[test]
+    fn snapshots_roundtrip_in_canonical_order() {
+        let snapshot = saved_book().snapshot();
+        let keys: Vec<_> = snapshot.entries().iter().map(|s| s.addr.key()).collect();
+        assert_eq!(
+            keys,
+            vec![addr(1, 0).key(), addr(2, 0).key(), addr(3, 0).key()]
+        );
+        assert_eq!(snapshot.entries()[1].verified_at, Some(150));
+        let bytes = snapshot.to_bytes();
+        assert_eq!(Snapshot::from_bytes(&bytes).unwrap(), snapshot);
+        assert_eq!(bytes, saved_book().snapshot().to_bytes(), "deterministic");
+        assert_eq!(bytes.len(), 1 + 4 + 3 * (16 + 2 + 8 + 1) + 8);
+    }
+
+    #[test]
+    fn snapshots_reject_garbage() {
+        let good = saved_book().snapshot().to_bytes();
+        let mut bad_version = good.clone();
+        bad_version[0] = 2;
+        let mut bad_flag = good.clone();
+        bad_flag[1 + 4 + 26] = 2;
+        let mut too_many = good.clone();
+        too_many[1..5].copy_from_slice(&u32::try_from(MAX_KNOWN + 1).unwrap().to_le_bytes());
+        let mut repeated = AddressBook::new();
+        repeated.add(addr(1, 100), 100);
+        let one = repeated.snapshot().to_bytes();
+        let mut twice = one.clone();
+        twice[1..5].copy_from_slice(&2u32.to_le_bytes());
+        twice.extend_from_slice(&one[5..]);
+        let mut reversed = good[..5].to_vec();
+        let entries = &good[5..];
+        reversed.extend_from_slice(&entries[27..54]);
+        reversed.extend_from_slice(&entries[..27]);
+        reversed.extend_from_slice(&entries[54..]);
+        let trailing = [good.as_slice(), &[0]].concat();
+        for (name, bytes) in [
+            ("empty", Vec::new()),
+            ("version", bad_version),
+            ("flag", bad_flag),
+            ("count", too_many),
+            ("duplicate", twice),
+            ("order", reversed),
+            ("truncated", good[..good.len() - 1].to_vec()),
+            ("trailing", trailing),
+        ] {
+            assert!(Snapshot::from_bytes(&bytes).is_err(), "{name} accepted");
+        }
+    }
+
+    #[test]
+    fn restored_books_keep_verification_under_gossip_rules() {
+        let mut rng = ChaCha20Rng::seed_from_u64(8);
+        let mut book = AddressBook::new();
+        let added = book.restore(saved_book().snapshot(), 200, |a| a.ip != addr(3, 0).ip);
+        assert_eq!(added, 2, "the policy filter drops one");
+        assert!(book.verified(addr(2, 0).key(), 200));
+        assert!(!book.verified(addr(1, 0).key(), 200));
+        assert_eq!(book.sample(10, 200, &mut rng).len(), 1);
+        assert_eq!(
+            book.restore(saved_book().snapshot(), 200, |_| true),
+            1,
+            "known stay"
+        );
+        assert_eq!(
+            AddressBook::new().restore(saved_book().snapshot(), 150 + MAX_AGE + 1, |_| true),
+            0
+        );
+    }
+
+    #[test]
+    fn restored_future_verification_is_not_trusted() {
+        let mut book = AddressBook::new();
+        book.restore(saved_book().snapshot(), 120, |_| true);
+        assert_eq!(book.len(), 3);
+        assert!(
+            !book.verified(addr(2, 0).key(), 120),
+            "verified at 150, now is 120"
+        );
     }
 }
