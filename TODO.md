@@ -200,7 +200,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Miners drop a template once the best tip moves (node tip watch); a mining wallet is exempt from idle auto-lock (2026-09-28)
 - [x] Release archives: `make dist` (Linux glibc 2.28 and Windows via Zig) and a tag-triggered release workflow for Linux, Windows, and macOS (arm64 and x86_64) (2026-09-28)
 - [x] Mining waits until the node is caught up: no work for the built-in miner or `getblocktemplate` while syncing, while a peer reports a longer chain, or on mainnet without a peer; a sync that makes no progress for 120 s drops its peer; the desktop Mining card shows "Waiting for sync" with the reason, and `/metrics` has `null_mining_ready` (2026-10-24)
-- [x] Release version (`vX.Y.Z`) always visible at the bottom of the desktop sidebar; the release workflow fails on a tag that does not match the workspace version (2026-10-24)
+- [x] Release version (`vX.Y.Z`) always visible at the bottom of the desktop sidebar; the release workflow fails on a tag that does not match the workspace version; release 0.1.7 (2026-10-24)
 - [x] Log file switch on the Node page (`log_file` in `null.conf`, off by default for privacy), `<network>/debug.log` rotated to `debug.log.1` above 10 MiB at start (2026-10-22)
 - [ ] Installers and signing: macOS .app bundle and notarization, Windows installer with the exe icon and Authenticode signing, Linux AppImage
 - [x] Activity as one list with local dates and times, All/Sent/Received/Mined filters, change hidden by default, search, and pages of 20; mined rewards dated by their paying block; release 0.1.5 (2026-10-19)

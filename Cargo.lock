@@ -2207,7 +2207,7 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "null-chain"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "blake2b_simd",
  "equihash",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "null-circuit"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "ff",
  "group",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "null-crypto"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "aes",
  "blake2b_simd",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "null-desktop"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "chrono",
  "clap",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "null-node"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "clap",
  "null-chain",
@@ -2317,7 +2317,7 @@ dependencies = [
 
 [[package]]
 name = "null-p2p"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "null-crypto",
  "null-protocol",
@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "null-protocol"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bech32",
  "ff",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "null-storage"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "ff",
  "incrementalmerkletree",
@@ -2362,7 +2362,7 @@ dependencies = [
 
 [[package]]
 name = "null-wallet"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "argon2",
  "bip39",
