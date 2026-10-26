@@ -7,7 +7,7 @@ After=network-online.target
 
 [Service]
 User=null
-ExecStart=/usr/local/bin/nulld run --network test \
+ExecStart=/usr/local/bin/nulld run --network main \
     --datadir /var/lib/null \
     --listen 0.0.0.0:19000 \
     --rpc 127.0.0.1:18444

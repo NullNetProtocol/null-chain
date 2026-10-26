@@ -29,6 +29,7 @@ use null_protocol::consensus::{
     MAX_BLOCK_TRANSACTIONS, PREMINE,
 };
 use null_protocol::disclosure::{Challenge, PaymentDisclosure};
+use null_protocol::memo::Memo;
 use null_protocol::note::Rho;
 use null_protocol::nullifier::Nullifier;
 use null_protocol::transaction::{Transaction, TxId};
@@ -984,7 +985,7 @@ async fn verify_disclosure(
                 "index": disclosure.index,
                 "address": note.recipient().encode(context.params.address_prefix),
                 "amount": note.value().raw().to_string(),
-                "memo": memo.to_text(),
+                "memo": memo_json(&memo),
                 "height": location.map(|(h, _)| h),
                 "confirmations": location.map_or(0, |(h, _)| confirmations(h, tip, true)),
             }))
@@ -1269,8 +1270,31 @@ fn peer_json(peer: &PeerSummary) -> Value {
     })
 }
 
+/// A memo as both services report it: `null` when empty, the text when it
+/// is UTF-8, otherwise `{"hex": ...}` so binary memos are never lost.
+pub(crate) fn memo_json(memo: &Memo) -> Value {
+    if memo.is_empty() {
+        return Value::Null;
+    }
+    match memo.to_text() {
+        Some(text) => json!(text),
+        None => json!({ "hex": to_hex(memo.as_bytes()) }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn memo_json_reports_empty_text_and_binary_memos() {
+        assert_eq!(memo_json(&Memo::empty()), Value::Null);
+        assert_eq!(memo_json(&Memo::from_text("ciao").unwrap()), json!("ciao"));
+        let mut bytes = [0u8; null_protocol::memo::MEMO_LEN];
+        bytes[0] = 0xff;
+        let hex = memo_json(&Memo::from_bytes(bytes));
+        assert_eq!(hex["hex"].as_str().unwrap(), to_hex(&bytes));
+    }
+
     use super::*;
 
     #[test]

@@ -41,7 +41,7 @@ use tokio::task::JoinHandle;
 
 use crate::cli::{fetch_block, passphrase, sync_wallet};
 use crate::config::Network;
-use crate::jsonrpc::{serve_with, unknown_method, Dispatch, Params, RpcError, REJECTED};
+use crate::jsonrpc::{memo_json, serve_with, unknown_method, Dispatch, Params, RpcError, REJECTED};
 use crate::node::TxStatus;
 use crate::paths;
 use crate::rpc::{transaction_status, Control, Endpoint, Source, Token};
@@ -861,16 +861,6 @@ fn is_cancellable(op: &Operation) -> bool {
 }
 
 /// A memo as text when it is text, else as hex, else null when empty.
-fn memo_json(memo: &Memo) -> Value {
-    if memo.as_bytes().iter().all(|b| *b == 0) {
-        return Value::Null;
-    }
-    match memo.to_text() {
-        Some(text) => json!(text),
-        None => json!({ "hex": to_hex(memo.as_bytes()) }),
-    }
-}
-
 /// An amount given as a decimal string or a number, in smallest units.
 fn parse_amount(value: Option<&Value>) -> core::result::Result<Amount, RpcError> {
     let raw = match value {

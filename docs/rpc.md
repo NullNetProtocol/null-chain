@@ -1,5 +1,9 @@
 # JSON-RPC reference for exchange and mining pool integration
 
+The published, per-method reference is https://docs.nullnet.sh/rpc; this
+file is the design record it was written from. When they differ, the code
+wins and both are fixed.
+
 Every method the node (`nulld --rpc-http`) and the wallet daemon
 (`null-wallet-rpc`) serve, with the reasoning behind the shape of the
 interface. `guide-exchange.md` and `guide-pool.md` are the walk-throughs
@@ -68,8 +72,10 @@ needs only the node; an exchange needs both.
   avoid 53-bit precision loss. Heights are numbers. Hashes, txids,
   nullifiers, blocks and transactions are lowercase hex. Addresses are
   bech32m text with the network prefix.
-- Every response carries the node's `network` and `branch` so a client
-  cannot mix networks or sign for the wrong rules by accident.
+- Responses are plain JSON-RPC 2.0 envelopes (`jsonrpc`, `result` or
+  `error`, `id`). A client checks the network and the consensus branch
+  with `getblockchaininfo` (`network`, `branch`, `next_branch`) before
+  building or signing anything.
 - Method names follow Bitcoin and Zcash where the meaning is the same, so
   integrators can reuse their mental model, and differ where it is not.
 
@@ -198,10 +204,7 @@ height `h` enters the note tree at `h + M - 1` and is spendable from block
 `h + M`, where `M` is `coinbase_maturity` (100 on mainnet). Wallets find a
 reward when it matures. Reorganizations deeper than 200 blocks are
 refused, so 200 confirmations is safe against anything the network will
-accept; pools choose their own number above the maturity. Stratum is the pool's side: it splits
-the 32-byte nonce space among miners, validates shares against
-`pow_input` with its own Equihash verifier, and pays miners through the
-wallet daemon of Phase 3, fifteen per transaction.
+accept; pools choose their own number above the maturity.
 
 **What the pool does itself.** Stratum is the pool's side: it splits the
 nonce space among miners, validates shares against `pow_input` with its
@@ -274,14 +277,14 @@ threshold; the network refuses reorganizations deeper than 200.
 | `listunspent` | `min_confirmations` = 1, `since_height` = 0 | unspent notes: `position`, `txid`, `height`, `confirmations`, `amount`, `address`, `address_index`, `label`, `memo` (text, `{hex}` for binary, null when empty), `spent`, `spent_at`, `spent_by`, `locked` |
 | `listreceived` | `min_confirmations` = 1, `since_height` = 0 | every note ever received, spent ones included, same fields |
 | `gettransaction` | `txid` | `{txid, height, confirmations, received: [notes], spent: [notes], net}`: our side of one transaction; `net` is received minus spent as a signed decimal string, so a withdrawal shows the fee as part of the outflow |
-| `rescan` | `from_height` = 0 | rolls the wallet back and rescans from there |
+| `rescan` | `from_height` = 0 | rolls the wallet back to `from_height - 1` and rescans from there; returns `{scanned_height}`, the height after the rollback |
 
 **Withdrawals.**
 
 | Method | Parameters | Result |
 |---|---|---|
-| `sendmany` | `recipients: [{address, amount, memo?}]` (1 to 15), `min_confirmations` = 1 | `{operation_id, status: "queued"}` at once |
-| `getoperationstatus` | `operation_id` | `operation_id`, `status` (`queued`, `proving`, `submitted`, `confirmed`, `failed`, `cancelled`), `created_at`, `recipients`, `total`, `min_confirmations`, `txid`, `height`, `confirmations`, `attempts`, `error` |
+| `sendmany` | `recipients: [{address, amount, memo?}]` (1 to 15), `min_confirmations` = 1 | `{operation_id, status: "queued"}` at once. Funds are not checked when queueing: a shortfall ends the operation as `failed` when it is built, so call `quotepayment` first |
+| `getoperationstatus` | `operation_id` | `operation_id`, `status` (`queued`, `proving`, `submitted`, `confirmed`, `failed`, `cancelled`), `created_at`, `recipients`, `total`, `min_confirmations`, `txid`, `height`, `confirmations`, `attempts`, `error`, `cancellable` |
 | `listoperations` | `status` (optional filter) | every operation, oldest first |
 | `canceloperation` | `operation_id` | the operation, now `cancelled`; only a `queued` operation with no recorded transaction can be cancelled, since an earlier broadcast may still be mined. Operations report this as `cancellable` |
 | `estimatefee` | `recipients` = 1 | `{fee, actions}` for that many recipients plus change; a lower bound, since spending many small notes can need a larger class |
@@ -370,8 +373,8 @@ memo the transaction does not carry.
 
 | Where | Method | Parameters | Result |
 |---|---|---|---|
-| wallet daemon | `getpaymentdisclosure` | `txid`, `index` (optional) | `[{index, disclosure (hex), address, amount, memo}]` for every output this wallet sent in the transaction, change included |
-| node | `verifypaymentdisclosure` | `disclosure` (hex) | `{valid: true, txid, index, address, amount, memo, height, confirmations}` or `{valid: false, reason}` |
+| wallet daemon | `getpaymentdisclosure` | `txid`, `index` (optional) | `[{index, disclosure (hex), address, amount, memo}]` for every output this wallet sent in the transaction, change included. Needs the spending txid the wallet recorded during a full scan: a `--light` wallet (compact blocks) records none and gets not found |
+| node | `verifypaymentdisclosure` | `disclosure` (hex) | `{valid: true, txid, index, address, amount, memo, height, confirmations}` or `{valid: false, reason}`; `memo` is reported as the wallet reports it (null when empty, text, or `{hex}`) |
 
 **Address ownership.** "Prove you control this address." The checker
 encrypts a message of their choosing to the address; only the holder of

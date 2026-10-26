@@ -204,7 +204,7 @@ random nonce so their throughput adds up. On mainnet, where single-
 threaded Equihash solving dominates, this scales nearly linearly.
 
 Amounts are in smallest units; one coin is 100 000 000 units and the
-block subsidy starts at ten coins. Building a payment generates the
+block subsidy starts at 9.7 coins. Building a payment generates the
 proving key and proves the transaction, which takes a couple of seconds.
 
 A faucet that pays a fixed amount to any address, rate-limited, is
