@@ -53,6 +53,71 @@ async fn http(addr: SocketAddr, token: &str, method: &str, params: Value) -> (St
     )
 }
 
+async fn gui(backend: &Backend, method: &str, params: Value) -> Result<Value, String> {
+    backend
+        .client
+        .submit(Action::Call {
+            method: method.into(),
+            params,
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .map(|outcome| outcome.value)
+}
+
+#[tokio::test]
+async fn console_actions_dispatch_params_errors_and_stop_the_whole_backend() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut backend = Backend::spawn(Config {
+        node: NodeConfig::test(),
+        rpc: "127.0.0.1:0".parse().unwrap(),
+        token_file: directory.path().join("token"),
+        wallet: directory.path().join("wallet.redb"),
+        mining: Mining {
+            enabled: false,
+            threads: 1,
+        },
+        log: LogFile {
+            enabled: false,
+            path: directory.path().join("debug.log"),
+        },
+        settings: directory.path().join("null.conf"),
+    });
+    let addr = ready(&mut backend).await;
+    let help = gui(&backend, "help", json!([])).await.unwrap();
+    assert!(help["node"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("getblockhash")));
+    assert!(help["wallet"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("getbalance")));
+    let positional = gui(&backend, "getblockhash", json!([0])).await.unwrap();
+    let named = gui(&backend, "node.getblockhash", json!({"height":0}))
+        .await
+        .unwrap();
+    assert_eq!(positional, named);
+    assert!(positional.as_str().is_some());
+    assert!(gui(&backend, "getbalance", json!([]))
+        .await
+        .unwrap_err()
+        .contains("locked"));
+    assert!(gui(&backend, "no_such_method", json!([])).await.is_err());
+    assert!(gui(&backend, "getblockhash", json!(["invalid"]))
+        .await
+        .is_err());
+    assert!(gui(&backend, "node.stop", json!([])).await.is_err());
+    assert_eq!(gui(&backend, "getblockcount", json!([])).await.unwrap(), 0);
+    assert_eq!(gui(&backend, "stop", json!([])).await.unwrap(), "stopping");
+    backend.shutdown().await.unwrap();
+    assert!(
+        TcpListener::bind(addr).await.is_ok(),
+        "stop must release the RPC port"
+    );
+}
+
 #[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gui_and_http_share_one_wallet_and_lock_releases_its_database() {
@@ -120,6 +185,10 @@ async fn gui_and_http_share_one_wallet_and_lock_releases_its_database() {
         .1["result"]
         .clone();
     assert!(address["address"].as_str().unwrap().starts_with("tnull1"));
+    assert!(gui(&backend, "getwalletinfo", json!([]))
+        .await
+        .unwrap()
+        .is_object());
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let snapshot = backend.snapshots.borrow().clone();

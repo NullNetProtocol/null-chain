@@ -155,7 +155,7 @@ impl Form {
         self.error = None;
         self.stage = Stage::QuotingConsolidation;
         Effect::Call(Call {
-            method: "quoteconsolidation",
+            method: "quoteconsolidation".into(),
             params: json!({ "min_confirmations": MIN_CONFIRMATIONS }),
             reply: Reply::ConsolidationQuote,
         })
@@ -212,7 +212,7 @@ impl Form {
                 });
                 self.stage = Stage::Quoting(payment);
                 Effect::Call(Call {
-                    method: "quotepayment",
+                    method: "quotepayment".into(),
                     params,
                     reply: Reply::Quote,
                 })

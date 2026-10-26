@@ -391,6 +391,106 @@ fn show_without_undo(ui: &mut Ui, edit: egui::TextEdit<'_>) -> Response {
     output.response
 }
 
+/// A command line with no undo copies of potentially sensitive arguments.
+pub fn console_input(ui: &mut Ui, value: &mut String) -> Response {
+    show_without_undo(
+        ui,
+        egui::TextEdit::singleline(value)
+            .id_salt("debug-command")
+            .return_key(None)
+            .font(egui::TextStyle::Monospace)
+            .hint_text(
+                RichText::new("e.g. getblockchaininfo")
+                    .color(theme::TEXT_MUTED)
+                    .italics(),
+            )
+            .char_limit(8192)
+            .desired_width(f32::INFINITY),
+    )
+}
+
+/// Command matches in a scrollable popup anchored to the console input.
+pub fn console_suggestions(
+    ui: &Ui,
+    input: &Response,
+    matches: &[String],
+    selected: usize,
+    visible: bool,
+    scroll_to_selected: bool,
+) -> Option<usize> {
+    let id = input.id.with("suggestions");
+    if !visible {
+        if ui.memory(|mem| mem.is_popup_open(id)) {
+            ui.memory_mut(egui::Memory::close_popup);
+        }
+        return None;
+    }
+    ui.memory_mut(|mem| mem.open_popup(id));
+    let direction = if ui.ctx().screen_rect().bottom() - input.rect.bottom()
+        < theme::CONSOLE_SUGGESTIONS_HEIGHT
+    {
+        egui::AboveOrBelow::Above
+    } else {
+        egui::AboveOrBelow::Below
+    };
+    egui::popup::popup_above_or_below_widget(
+        ui,
+        id,
+        input,
+        direction,
+        egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            let mut clicked = None;
+            egui::ScrollArea::vertical()
+                .max_height(theme::CONSOLE_SUGGESTIONS_HEIGHT)
+                .show(ui, |ui| {
+                    for (index, method) in matches.iter().enumerate() {
+                        let row = ui
+                            .selectable_label(selected == index, RichText::new(method).monospace());
+                        if scroll_to_selected && selected == index {
+                            row.scroll_to_me(Some(Align::Center));
+                        }
+                        if row.clicked() {
+                            clicked = Some(index);
+                        }
+                    }
+                });
+            clicked
+        },
+    )
+    .flatten()
+}
+
+/// Moves the caret to the end of a recalled command.
+pub fn console_cursor_end(ui: &Ui, id: egui::Id, text: &str) {
+    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(text.chars().count()),
+            )));
+        state.store(ui.ctx(), id);
+    }
+}
+
+/// Selectable, read-only console text, with errors distinguished by tone.
+pub fn console_text(ui: &mut Ui, text: &str, error: bool) {
+    let mut text = text;
+    show_without_undo(
+        ui,
+        egui::TextEdit::multiline(&mut text)
+            .font(egui::TextStyle::Monospace)
+            .text_color(if error {
+                Tone::Danger.color()
+            } else {
+                theme::TEXT
+            })
+            .frame(false)
+            .desired_rows(1)
+            .desired_width(f32::INFINITY),
+    );
+}
+
 /// Lays out `count` recovery word cells in rows of
 /// [`theme::WORDS_PER_ROW`], all the same width, filling the available
 /// width; `cell` draws the word at each index.
@@ -602,7 +702,7 @@ mod tests {
             egui::SidePanel::left("nav")
                 .exact_width(theme::SIDEBAR_WIDTH)
                 .show(ctx, |ui| {
-                    for label in ["Overview", "Receive", "Send", "Activity", "Node"] {
+                    for label in ["Overview", "Receive", "Send", "Activity", "Node", "Debug"] {
                         rects.push(nav_item(ui, Icon::Send, label, label == "Send").rect);
                     }
                 });

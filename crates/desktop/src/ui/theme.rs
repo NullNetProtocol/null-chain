@@ -103,6 +103,10 @@ pub const WORD_CELL_PADDING: i8 = 8;
 pub const SIDEBAR_WIDTH: f32 = 200.0;
 /// Minimum height of buttons and inputs, a comfortable click target.
 pub const CONTROL_HEIGHT: f32 = 34.0;
+/// Height of the debug console's scrolling transcript.
+pub const CONSOLE_HEIGHT: f32 = 260.0;
+/// Maximum height of command suggestions, before the list scrolls.
+pub const CONSOLE_SUGGESTIONS_HEIGHT: f32 = 180.0;
 
 /// Size of large figures, such as the balance.
 pub const DISPLAY_SIZE: f32 = 38.0;

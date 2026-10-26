@@ -194,6 +194,46 @@ privacy wallet should not leave on disk unless asked; switch it on when
 reporting a problem. A log over 10 MiB is moved to `debug.log.1`
 (replacing the older one) when logging starts.
 
+## Debug console
+
+Open **Debug** in the sidebar to run RPC commands against the embedded
+node and the current wallet. Type a command and press **Enter** or **Run**;
+**Help** lists the available methods. Results appear as formatted JSON,
+and errors appear beside the command in the transcript.
+
+```text
+getblockchaininfo
+getblockhash 0
+getblockhash [0]
+getblockhash {"height":0}
+getnewaddress "Savings account"
+```
+
+Arguments can be individual values, a JSON parameter array, or a JSON
+object for named parameters. Individual numbers, booleans and `null` keep
+their JSON types; unquoted words become strings. Use JSON double quotes for
+strings containing spaces, escapes, or numeric text. These are RPC methods,
+not shell commands or full `nulld` command lines. Amounts follow RPC
+conventions: integer strings in the smallest unit, not decimal NULL.
+
+Commands execute immediately, including payments and methods that export
+private wallet data. Node methods work with the wallet locked; wallet
+methods require unlocking through the usual GUI. Wallet methods win name
+collisions; use `node.` to select the node version. `stop` shuts down the
+whole backend, just as it does over HTTP.
+
+While typing a method, a dropdown suggests matching node and wallet
+commands, including `node.` methods. Use **Up/Down** to select a match,
+**Tab** or **Enter** to fill it in, or click it. Selecting a suggestion
+does not run it; press **Enter** again or **Run** to execute. **Esc**
+dismisses the suggestions. Suggestions stop once you start typing arguments.
+With suggestions closed, **Up/Down** recalls commands and returns to an unfinished input.
+The console retains the last 100 commands in memory and displays up to
+64 KiB per result. Text can be selected and copied. **Clear**, locking the
+wallet (including automatic locking), or closing the app discards console
+input, transcript, and history. Console contents are never written to the
+log or configuration file.
+
 ## RPC
 
 The endpoint serves the existing node and wallet methods with the same

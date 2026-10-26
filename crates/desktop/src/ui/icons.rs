@@ -28,6 +28,8 @@ pub enum Icon {
     Activity,
     /// Two stacked servers: the node.
     Node,
+    /// A terminal prompt: the debug console.
+    Debug,
 }
 
 impl Icon {
@@ -62,6 +64,11 @@ impl Icon {
                 rectangle(p(2.0, 9.0), p(14.0, 13.5)),
                 vec![p(4.5, 4.75), p(4.6, 4.75)],
                 vec![p(4.5, 11.25), p(4.6, 11.25)],
+            ],
+            Self::Debug => vec![
+                rectangle(p(1.5, 2.5), p(14.5, 13.5)),
+                vec![p(4.0, 5.5), p(6.5, 8.0), p(4.0, 10.5)],
+                vec![p(8.5, 10.5), p(12.0, 10.5)],
             ],
         }
     }
@@ -133,12 +140,13 @@ pub fn stroke_path(painter: &Painter, points: &[Pos2], stroke: Stroke) {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 5] = [
+    const ALL: [Icon; 6] = [
         Icon::Overview,
         Icon::Receive,
         Icon::Send,
         Icon::Activity,
         Icon::Node,
+        Icon::Debug,
     ];
 
     #[test]

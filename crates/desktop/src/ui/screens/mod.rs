@@ -10,6 +10,7 @@
 
 pub mod activity;
 pub mod backup;
+pub mod debug;
 pub mod mining;
 pub mod node;
 pub mod overview;
@@ -33,7 +34,7 @@ pub enum Effect {
 /// A node or wallet method invocation requested by a screen.
 pub struct Call {
     /// RPC method name.
-    pub method: &'static str,
+    pub method: String,
     /// Positional or named parameters.
     pub params: Value,
     /// What to do with the result.
@@ -44,7 +45,7 @@ impl Call {
     /// A call whose success is reported as `notice`.
     pub fn notice(method: &'static str, params: Value, notice: &'static str) -> Effect {
         Effect::Call(Self {
-            method,
+            method: method.into(),
             params,
             reply: Reply::Notice(notice),
         })
@@ -60,12 +61,14 @@ pub enum Reply {
     Quote,
     /// Hand the consolidation quote to the send screen for review.
     ConsolidationQuote,
+    /// Hand a command's result or error to the debug console.
+    Debug,
 }
 
 impl From<Call> for Action {
     fn from(call: Call) -> Self {
         Action::Call {
-            method: call.method.into(),
+            method: call.method,
             params: call.params,
         }
     }

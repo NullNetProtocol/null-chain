@@ -299,8 +299,14 @@ async fn run(
             _ = &mut stopped => break,
             command = commands.recv() => match command {
                 Some(Command::Action(action, reply)) => {
-                    let result = state.action(action).await.map_err(|e| e.to_string());
+                    let stop = matches!(&action, Action::Call { method, .. } if method == "stop");
+                    let result = if stop {
+                        Ok(Outcome { value: json!("stopping"), ..Outcome::message("Stopping") })
+                    } else {
+                        state.action(action).await.map_err(|e| e.to_string())
+                    };
                     let _ = reply.send(result);
+                    if stop { break; }
                     state.publish(updates, addr).await;
                 }
                 Some(Command::Rpc(method, params, reply)) => {
