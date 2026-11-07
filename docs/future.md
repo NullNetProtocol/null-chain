@@ -1,7 +1,8 @@
 # Future directions
 
-A design note, not a commitment. It records how two recurring requests —
-post-quantum security and "adaptive privacy" — fit (or clash) with this
+A design note, not a commitment. It records how recurring requests —
+post-quantum security, "adaptive privacy", confidential assets and atomic
+swaps — fit (or clash) with this
 coin's priorities, so the discussion does not have to be repeated. The
 priorities are unchanged: anonymity first, uniform transactions, and the
 rule that anything variable in a transaction is a fingerprint
@@ -144,3 +145,66 @@ rather than a single private currency, and the cryptography is proven
 base circuit and crypto have been externally audited, with issuance treated
 as the deliberate exception to the privacy guarantee — everything else
 staying uniform and indistinguishable from the native coin.
+
+## Atomic swaps
+
+Decided on 2026-11-04 (`docs/decisions.md`): follow the Monero-style
+scriptless approach and keep NULL fully shielded. This supersedes the
+2026-10-30 plan to support both public HTLC outputs and scriptless swaps.
+It is a design direction, not an implemented swap protocol.
+
+The technical background, reference execution and recovery paths, proposed
+NULL adaptation, and primary sources are in
+[atomic-swaps.md](atomic-swaps.md).
+
+**Shielded-only policy.** Every NULL movement in a swap must remain in
+ordinary shielded notes: funding, settlement, refunds and recovery. Never
+introduce transparent addresses, unshielded spendable outputs, public swap
+amounts or exits from the shielded pool to obtain DEX compatibility.
+Exposure or a listing does not justify an exception to this policy.
+
+**Chosen approach: Monero-style scriptless swaps.** Investigate joint
+control of a temporary shielded note, with adaptor signatures releasing
+the key material needed to settle. Timelocks and the associated refund
+logic live on the counterparty chain. The target is for every NULL
+transaction to have the same on-chain shape as an ordinary payment, with
+no public swap hash, amount or special output type on NULL.
+
+Start with a NULL–BTC or NULL–LTC protocol, where the other chain can
+enforce the required timelocks. Direct NULL–XMR swaps need separate
+research; support for one scriptless side does not establish a safe
+protocol for two chains without the required scripting and timelocks.
+
+Work still required:
+
+- Specify the full success, refund and recovery protocol, including peer
+  dropout, restarts, reorgs and anchor expiry. Each NULL path stays
+  shielded; an unshielded fallback is not acceptable.
+- Extend the builder to take `ask + fvk`, and validate joint spend
+  authority under RedPallas. Choose audited implementations of the
+  necessary primitives, including secp256k1–Pallas discrete-log equality
+  proofs (`CLAUDE.md` rule 4); the exact signing construction remains open.
+- Restrict any viewing-key disclosure to a dedicated swap key, never the
+  user's wallet viewing key.
+- Validate whether existing consensus and transaction shapes suffice.
+  Avoiding consensus changes is a goal, not an established result.
+- Prototype on testnet, review the privacy of every path, and obtain
+  independent cryptographic and protocol review before mainnet use.
+
+**Privacy scope.** Keeping NULL shielded does not make the whole trade
+invisible. The counterparty knows the agreed amounts, the other chain may
+be public, and order metadata, timing and network activity can correlate
+the trade. Evaluate these separately from NULL's on-chain privacy and
+document the limits without claiming complete swap anonymity.
+
+**DEX integration.** Evaluate a BasicSwap-style scriptless integration
+after protocol feasibility and liquidity-provider interest are established.
+Any DEX must support this shielded-only approach. The former KDF /
+AtomicDEX public-HTLC integration is rejected; a listing must wait if the
+DEX requires an unshielded NULL hop.
+
+**Other approaches.** Public HTLC / ZHTLC hops and general transparent
+scripts are rejected because they expose swap endpoints. HTLCs inside the
+circuit are not the chosen direction: proving knowledge of a preimage
+alone does not deliver the secret needed by the counterparty, and a safe
+construction would add circuit and protocol complexity.

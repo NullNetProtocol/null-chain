@@ -1331,3 +1331,126 @@ first build consumes every selected note: greedy payment selection could
 otherwise omit a tiny note at a fee-tier boundary and fail to consolidate
 it. The CLI preview only scans; execution runs the same wallet worker and
 prints the operation ids and their resulting states.
+
+## 2026-10-30: Atomic swaps in two layers, a fixed HTLC and scriptless swaps
+
+**Superseded by the 2026-11-04 decision below.** Retained as historical
+context only. The public HTLC path is rejected, and the scriptless
+feasibility claims below require validation rather than being established
+implementation facts.
+
+Goal: listings on atomic swap DEXes, first the Komodo DeFi Framework
+(KDF, formerly AtomicDEX), and on other bridges. Swaps on HTLC-based
+DEXes such as KDF lock funds on both chains under the same hash and a
+timelock. This chain has no transparent outputs, scripts, locktime or
+expiry, so as it stands it cannot take part in such a swap.
+
+Chosen: two mechanisms that coexist, because they live in different
+layers.
+
+- **Fixed HTLC output, by network upgrade (for KDF and other HTLC
+  DEXes).** One hard-coded template, not a script language: an output
+  holding `value`, `sha256(secret)`, `refund_height`, `claim_key` and
+  `refund_key`, funded from shielded notes through a public value balance.
+  It is spent once, either by the secret and a claim-key signature or
+  after `refund_height` by a refund-key signature, back into shielded
+  notes. Value enters and leaves through the value balance and the binding
+  signature, so `crates/circuit` does not change. This mirrors Pirate's
+  ZHTLC, where (to be confirmed in KDF's `z_coin` before building) the
+  swap passes through a transparent P2SH hop between shielded notes.
+- **Scriptless swaps with adaptor signatures (for privacy-focused
+  swaps).** As in Monero–Bitcoin swaps: on this chain the funds sit in an
+  ordinary note whose spend authority is split 2-of-2 (FROST over
+  RedPallas, already in `reddsa`). The timelock and refund live on the
+  other chain (Bitcoin and Litecoin via Taproot, EVM chains), and the
+  secret is revealed through an adaptor signature rather than a hash, so
+  no hash links the two legs. No consensus change; on this chain the lock
+  and the claim cannot be told apart from any other payment.
+
+**Privacy argument (`CLAUDE.md` rule 9).** The HTLC output is a
+deliberate, documented exception, like token issuance would be
+(`docs/future.md`). An HTLC transaction is recognisable as a swap and
+cannot be made otherwise: the lock is public and the same hash appears in
+the counterparty chain's HTLC, which links the two legs. The exposure is
+limited to the HTLC hop: its amount, its hash and its timing. Funds come
+from and return to the shielded pool, so the user's wallet history and
+every other transaction stay uniform. Fixed refund delays and a single
+template keep swaps from fingerprinting each other further. Users who
+need the swap itself hidden use the scriptless path. Wallets and docs
+present the HTLC as "compatible but visible" and the scriptless swap as
+"private". The other chain's side and timing across chains are visible in
+both cases; only this chain's side can be hidden.
+
+Alternatives considered:
+
+- **HTLC conditions inside the circuit** (lock committed in the note,
+  preimage proven in zero knowledge). Rejected: the first claim must hand
+  the secret to the counterparty, which needs either a public reveal (no
+  privacy gain) or verifiable encryption carried by every transaction;
+  counterparty chains use SHA-256 (KDF uses RIPEMD160 of SHA-256), which
+  is very expensive in Halo2 and has no production-grade gadget; and rule
+  9 would make every action pay that cost, swap or not. It is also a
+  circuit change needing an audit.
+- **A general transparent script system.** Rejected: a large consensus
+  surface, and every script shape would be a new fingerprint. One fixed
+  template is all an HTLC swap needs.
+- **Scriptless swaps only.** Rejected for now: KDF's protocol assumes an
+  HTLC on both chains, so a listing would wait on a new KDF swap protocol.
+
+Consequences: the HTLC output is permanent consensus surface (history
+must keep validating), so its template is designed once. The KDF side is
+a new coin module built on `protocol` and `wallet`, since KDF's `z_coin`
+is built on Sapling; its maintainers are asked before it is written. The
+scriptless path depends on the builder taking `ask + fvk` instead of the
+spending key, which hardware wallets need too.
+
+## 2026-11-04: Monero-style atomic swaps, always shielded on NULL
+
+Chosen: pursue the Monero-style scriptless approach as the only atomic
+swap direction. This supersedes the 2026-10-30 decision to support both
+public HTLC outputs and scriptless swaps. The reason is the chain's core
+priority: privacy takes precedence over DEX listings and exposure.
+
+Every NULL movement in a swap, including funding, settlement, refunds and
+recovery, must remain fully shielded in ordinary notes. Never introduce
+transparent addresses, unshielded spendable outputs, public swap amounts
+or exits from the shielded pool for integration compatibility. There is
+no optional visible swap path or unshielded fallback.
+
+Investigate joint control of a temporary shielded note and adaptor
+signatures, with timelocks and the associated refund logic on the
+counterparty chain. Start by specifying a NULL–BTC or NULL–LTC protocol.
+Direct NULL–XMR swaps require separate research. Keeping the existing
+consensus and transaction shape is a goal; the earlier claim that this
+needs no consensus change remains unproven until the complete protocol is
+validated. The joint signing construction and audited cross-group proof
+implementation also remain open.
+
+Alternatives considered:
+
+- **Public HTLC / ZHTLC outputs.** Rejected: exposing amounts, swap
+  endpoints and shared hashes conflicts with the shielded-only policy.
+  Returning funds to the pool does not erase those public observations.
+- **A general transparent script system.** Rejected for the same privacy
+  reason and its additional consensus surface.
+- **HTLC conditions inside the circuit.** Not chosen: proving preimage
+  knowledge does not by itself release the secret to the counterparty;
+  a complete construction would need additional circuit and protocol work.
+
+Consequences: remove the public HTLC output, public swap value balance,
+HTLC storage and activation work from the roadmap. DEX integration must
+adapt to shielded NULL payments; evaluate a BasicSwap-style integration
+after protocol feasibility and liquidity-provider interest are established.
+A KDF / AtomicDEX listing that requires an unshielded NULL hop is rejected.
+The builder's `ask + fvk` work remains relevant. Prototype and independently
+review success and recovery paths, including dropout, restarts, reorgs and
+anchor expiry, before mainnet use.
+
+Privacy scope: ordinary NULL transaction shapes do not guarantee an
+anonymous trade. The counterparty knows the agreed amounts, the other
+chain may be public, and orders, timing and network activity can leak
+metadata. Preserve NULL's on-chain privacy and assess these remaining
+exposures separately. `TODO.md` tracks the work; `docs/future.md` holds
+the current technical sketch. The detailed reference protocol, recovery
+limits and proposed NULL adaptation are in
+[atomic-swaps.md](atomic-swaps.md).

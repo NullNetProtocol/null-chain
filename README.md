@@ -23,7 +23,9 @@ The roadmap is in [`TODO.md`](TODO.md), engineering rules in
 [`docs/rpc.md`](docs/rpc.md) with the exchange and pool walk-throughs in
 [`docs/guide-exchange.md`](docs/guide-exchange.md) and
 [`docs/guide-pool.md`](docs/guide-pool.md), and measured numbers in
-[`docs/perf.md`](docs/perf.md).
+[`docs/perf.md`](docs/perf.md). The Monero-style atomic swap design note,
+including the proposed shielded-only NULL adaptation and references, is
+[`docs/atomic-swaps.md`](docs/atomic-swaps.md).
 
 ## Build and test
 

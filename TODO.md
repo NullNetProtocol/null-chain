@@ -210,6 +210,27 @@ Tick an item only when it has tests and passes clippy.
 - [ ] Push-driven UI updates, accessibility, native platform tests and signed packages
 - [ ] Desktop security review, including toolkit copies of secrets and shared node/wallet process
 
+## Atomic swaps
+
+Decision of 2026-11-04: follow the Monero-style scriptless approach. Every
+NULL movement, including swap funding, settlement and recovery, must stay
+fully shielded. No transparent addresses, unshielded outputs, public swap
+amounts or exits from the shielded pool for DEX compatibility. This
+supersedes the fixed-HTLC plan of 2026-10-30; see `docs/decisions.md` and
+`docs/future.md`.
+
+- [x] Choose shielded-only, Monero-style swaps; reject the public HTLC / ZHTLC hop (2026-11-04)
+- [x] Document the reference protocol, recovery limits and proposed NULL adaptation with primary sources in [docs/atomic-swaps.md](docs/atomic-swaps.md) (2026-11-04)
+- [ ] Specify a NULL–BTC or NULL–LTC protocol with joint control of a shielded note, adaptor signatures, and timelocks on the counterparty chain
+- [ ] Validate whether the complete protocol can use existing consensus and ordinary transaction shapes; do not assume that a consensus change is unnecessary
+- [ ] Builder takes `ask` + `fvk` (also listed in Phase 2)
+- [ ] Select audited primitives for joint spend authority and secp256k1–Pallas discrete-log equality proofs; validate RedPallas compatibility
+- [ ] Define swap-specific viewing-key disclosure and payment verification without sharing the user's wallet viewing key
+- [ ] Specify and test success, refund, cancellation, peer dropout, restart, reorg and anchor-expiry handling; every NULL path stays shielded
+- [ ] Review privacy against public observers, counterparties and network observers, including order metadata and timing correlation
+- [ ] Prototype on testnet and obtain independent cryptographic and protocol review before mainnet use
+- [ ] Evaluate a BasicSwap-style integration and liquidity-provider interest; support a DEX only if it can preserve NULL's shielded-only policy
+
 ## Cross-platform
 
 - [x] Shared per-user data directory for `nulld`, `null-wallet-rpc`, and desktop on Linux, macOS, and Windows; `nulld run --in-memory` (2026-09-24)
