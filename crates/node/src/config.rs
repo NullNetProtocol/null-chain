@@ -29,6 +29,11 @@ const MAIN_SEEDS: [&str; 5] = [
     "seed5.nullnet.sh:19000",
 ];
 
+/// Main network onion seeds, run by the project. Dialed only through
+/// `--proxy` (Tor), the one transport that can resolve them.
+const MAIN_ONION_SEEDS: [&str; 1] =
+    ["nullseegbz4a5h733sby7su7s7pknddsg7mwxrkiaotkzf7pghnzqcqd.onion:19000"];
+
 /// Which network to join.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Network {
@@ -81,6 +86,22 @@ impl Network {
             Self::Main => &MAIN_SEEDS,
             Self::Test => &[],
         }
+    }
+
+    /// Bootstrap peers reachable only as Tor onion services.
+    pub fn onion_seeds(self) -> &'static [&'static str] {
+        match self {
+            Self::Main => &MAIN_ONION_SEEDS,
+            Self::Test => &[],
+        }
+    }
+
+    /// The seeds a node dials: the network's seeds, plus its onion seeds
+    /// when outbound connections go through a SOCKS5 proxy. Without one,
+    /// an onion name cannot resolve and would only fail.
+    pub fn bootstrap_seeds(self, proxied: bool) -> Vec<&'static str> {
+        let onion: &[&str] = if proxied { self.onion_seeds() } else { &[] };
+        self.seeds().iter().chain(onion).copied().collect()
     }
 }
 
@@ -217,5 +238,33 @@ mod tests {
     #[test]
     fn the_test_network_has_no_public_seeds() {
         assert_eq!(Network::Test.seeds().len(), 0);
+        assert_eq!(Network::Test.onion_seeds().len(), 0);
+        assert!(Network::Test.bootstrap_seeds(true).is_empty());
+    }
+
+    #[test]
+    fn main_onion_seeds_are_v3_onions_on_the_default_port() {
+        let seeds = Network::Main.onion_seeds();
+        assert!(!seeds.is_empty());
+        for seed in seeds {
+            let (host, port) = seed.rsplit_once(':').unwrap();
+            assert_eq!(port.parse::<u16>().unwrap(), DEFAULT_P2P_PORT, "{seed}");
+            let name = host.strip_suffix(".onion").unwrap();
+            assert_eq!(name.len(), 56, "{seed}");
+            assert!(
+                name.bytes()
+                    .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)),
+                "{seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn onion_seeds_are_dialed_only_through_a_proxy() {
+        let direct = Network::Main.bootstrap_seeds(false);
+        assert_eq!(direct, Network::Main.seeds());
+        let proxied = Network::Main.bootstrap_seeds(true);
+        assert_eq!(&proxied[..direct.len()], &direct[..]);
+        assert_eq!(&proxied[direct.len()..], Network::Main.onion_seeds());
     }
 }

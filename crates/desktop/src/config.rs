@@ -335,7 +335,12 @@ impl Startup {
                 .connect
                 .iter()
                 .cloned()
-                .chain(network.seeds().iter().map(ToString::to_string))
+                .chain(
+                    network
+                        .bootstrap_seeds(settings.proxy.is_some())
+                        .into_iter()
+                        .map(ToString::to_string),
+                )
                 .collect(),
             proxy: settings.proxy,
             ..NodeConfig::test()
@@ -633,6 +638,27 @@ mod tests {
         }
         let (saved, _) = read_settings(&startup.paths.config).unwrap();
         assert_eq!(saved.connect, ["peer:19000"]);
+    }
+
+    #[test]
+    fn onion_seeds_are_dialed_only_with_a_proxy() {
+        let dials_onions = |proxy: Option<SocketAddr>| {
+            let dir = tempfile::tempdir().unwrap();
+            let args = Args {
+                datadir: Some(dir.path().join("data")),
+                network: Some(Network::Main),
+                proxy,
+                ..Args::default()
+            };
+            let startup = Startup::load(&args).unwrap();
+            let connect = &startup.backend.node.connect;
+            Network::Main
+                .onion_seeds()
+                .iter()
+                .all(|seed| connect.iter().any(|c| c == seed))
+        };
+        assert!(!dials_onions(None));
+        assert!(dials_onions(Some("127.0.0.1:9050".parse().unwrap())));
     }
 
     #[test]

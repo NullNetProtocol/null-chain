@@ -141,7 +141,8 @@ To reach peers over Tor, add `--proxy 127.0.0.1:9050`; every outbound
 connection then goes through the SOCKS5 proxy and `.onion` names work in
 `--connect`. For I2P, add `--i2p 127.0.0.1:7656` to reach `.i2p` peers
 through a router's SAM bridge. The main network dials
-`seed1`–`seed5.nullnet.sh:19000` automatically. The test network has no
+`seed1`–`seed5.nullnet.sh:19000` automatically, and with `--proxy` also
+the onion seed `nullseegbz4a5h733sby7su7s7pknddsg7mwxrkiaotkzf7pghnzqcqd.onion:19000`. The test network has no
 public seeds, so pass `--connect` or `--seed` there.
 
 Peers exchange addresses automatically, including listening nodes that join

@@ -45,7 +45,8 @@ Defaults:
   proxy configured.
 - Log file: `<network>/debug.log`, only when switched on (see below).
 - P2P: outbound connections only unless `--listen` is supplied.
-- SOCKS5: `--proxy <host:port>`; this connects to an existing proxy.
+- SOCKS5: `--proxy <host:port>`; this connects to an existing proxy. With
+  a proxy the main network's onion seed is dialed too.
 
 Launch without arguments for ordinary use. On first launch, choose **Create
 a new wallet** to generate a 24-word recovery phrase, or **Import recovery

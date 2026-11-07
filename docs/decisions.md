@@ -1490,3 +1490,17 @@ snapshot started in an older epoch is dropped, so wallet data cannot appear
 after a lock. Lock cancels the snapshot and waits for calls, keeping the
 rule that no task holds the wallet once lock returns. The node change
 remains on the roadmap.
+
+## 2026-11-07: An onion seed, dialed only through a proxy
+
+Alternative: put the onion address in the ordinary seed list.
+
+Chosen: a separate `MAIN_ONION_SEEDS` list, appended to the seeds only
+when `--proxy` (or `proxy` in `null.conf`) is set. Without a SOCKS5 proxy
+an `.onion` name cannot resolve, so every clearnet node would log a failed
+dial per start for nothing. Behind Tor, a node then has a project seed it
+reaches without leaving the Tor network. The seed (seed6) listens only on
+its onion service; inbound onion peers all arrive from loopback, which is
+already never banned, and it announces no address. Peer gossip stays
+IP-only: onion peers learn clearnet addresses from it and dial them
+through the same proxy.

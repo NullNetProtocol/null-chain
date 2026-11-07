@@ -117,6 +117,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Headers-first sync state machine: locator, chained header acceptance, bounded in-flight block requests with timeouts
 - [x] Dandelion++ routing state: epochs, stem map, fluff probability, embargo timers
 - [x] `--proxy` routes every outbound connection through SOCKS5, which reaches `.onion` peers via Tor; no feature flag needed
+- [x] Onion seed: the main network also dials `MAIN_ONION_SEEDS` (seed6, a project node reachable only over Tor) when a proxy is set, in `nulld` and the desktop wallet (2026-11-07)
 - [x] I2P via the SAM v3 bridge: `--i2p <sam addr>` opens one transient session and streams to `.i2p` peers, as `--proxy` reaches `.onion` peers (`node::i2p`)
 - [x] Compact block relay: header, coinbase and txids, missing transactions fetched with `GetBlockTxn`
 - [x] Property tests over the decoder and framer in `crates/p2p/tests`; `cargo-fuzz` target in `fuzz/`

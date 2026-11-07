@@ -605,7 +605,12 @@ async fn run_node(opts: RunOptions) -> Result<()> {
     let token_given = rpc_token.is_some();
     let mut targets = connect;
     targets.extend(seed);
-    targets.extend(network.seeds().iter().map(ToString::to_string));
+    targets.extend(
+        network
+            .bootstrap_seeds(proxy.is_some())
+            .into_iter()
+            .map(ToString::to_string),
+    );
     let config = Config {
         network,
         datadir,
