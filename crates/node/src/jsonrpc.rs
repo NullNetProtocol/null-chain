@@ -162,10 +162,12 @@ impl From<null_wallet::Error> for RpcError {
             null_wallet::Error::InsufficientFunds { .. }
             | null_wallet::Error::Consolidation(_)
             | null_wallet::Error::WatchOnly
+            | null_wallet::Error::WrongPassphrase
+            | null_wallet::Error::SeedMismatch
             | null_wallet::Error::TooManyRecipients(_) => Self::new(REJECTED, error.to_string()),
-            null_wallet::Error::Protocol(_) | null_wallet::Error::Crypto(_) => {
-                Self::invalid_params(error.to_string())
-            }
+            null_wallet::Error::Protocol(_)
+            | null_wallet::Error::Crypto(_)
+            | null_wallet::Error::SeedPhrase(_) => Self::invalid_params(error.to_string()),
             other => Self::new(INTERNAL_ERROR, other.to_string()),
         }
     }
@@ -358,7 +360,12 @@ impl Context {
         Ok(())
     }
 
-    async fn ask(&self, request: Request) -> core::result::Result<Response, RpcError> {
+    /// Sends one control request to the node loop and waits for its
+    /// answer; a `Failed` answer becomes a rejection.
+    ///
+    /// # Errors
+    /// Fails if the node stopped or refused the request.
+    pub async fn ask(&self, request: Request) -> core::result::Result<Response, RpcError> {
         let (reply, response) = oneshot::channel();
         self.events
             .send(Event::Rpc { request, reply })

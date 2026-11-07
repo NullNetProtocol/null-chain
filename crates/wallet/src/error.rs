@@ -45,6 +45,9 @@ pub enum Error {
     /// The seed phrase is not a valid BIP 39 mnemonic.
     #[error("invalid seed phrase: {0}")]
     SeedPhrase(String),
+    /// A seed phrase derives another spending key than the wallet's.
+    #[error("seed phrase does not match this wallet")]
+    SeedMismatch,
     /// The wallet file contradicts itself.
     #[error("corrupt wallet: {0}")]
     Corrupt(&'static str),

@@ -30,6 +30,8 @@ pub enum Icon {
     Node,
     /// A terminal prompt: the debug console.
     Debug,
+    /// A key: the recovery phrase backup.
+    Backup,
 }
 
 impl Icon {
@@ -69,6 +71,12 @@ impl Icon {
                 rectangle(p(1.5, 2.5), p(14.5, 13.5)),
                 vec![p(4.0, 5.5), p(6.5, 8.0), p(4.0, 10.5)],
                 vec![p(8.5, 10.5), p(12.0, 10.5)],
+            ],
+            Self::Backup => vec![
+                arc(p(5.0, 8.0), 3.0, 0.0, 2.0 * PI),
+                vec![p(8.0, 8.0), p(14.5, 8.0)],
+                vec![p(12.0, 8.0), p(12.0, 10.5)],
+                vec![p(14.5, 8.0), p(14.5, 11.0)],
             ],
         }
     }
@@ -140,13 +148,14 @@ pub fn stroke_path(painter: &Painter, points: &[Pos2], stroke: Stroke) {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 6] = [
+    const ALL: [Icon; 7] = [
         Icon::Overview,
         Icon::Receive,
         Icon::Send,
         Icon::Activity,
         Icon::Node,
         Icon::Debug,
+        Icon::Backup,
     ];
 
     #[test]

@@ -129,14 +129,17 @@ impl Form {
             ui.add_space(theme::SPACE_SM);
         }
         widgets::field_label(ui, "Wallet passphrase", None);
-        widgets::secret_input(ui, &mut self.passphrase, "passphrase", true);
+        // Enter submits from the last passphrase box, as the button does.
+        let mut entered = widgets::secret_input(ui, &mut self.passphrase, "passphrase", true);
         if !wallet_present {
             widgets::field_label(ui, "Confirm passphrase", None);
-            widgets::secret_input(ui, &mut self.confirmation, "confirmation", true);
+            entered = widgets::secret_input(ui, &mut self.confirmation, "confirmation", true);
         }
         ui.add_space(theme::SPACE_MD);
         ui.horizontal(|ui| {
-            if widgets::primary_button(ui, self.submit_label(wallet_present), true).clicked() {
+            let clicked =
+                widgets::primary_button(ui, self.submit_label(wallet_present), true).clicked();
+            if clicked || entered {
                 return Some(self.submit(wallet_present));
             }
             (!wallet_present && widgets::secondary_button(ui, "Back", true).clicked())
@@ -186,12 +189,12 @@ impl Form {
 }
 
 /// One empty input per recovery word.
-fn blank_words() -> Vec<Zeroizing<String>> {
+pub(super) fn blank_words() -> Vec<Zeroizing<String>> {
     (0..WORD_COUNT).map(|_| Zeroizing::default()).collect()
 }
 
 /// Draws one numbered input per recovery word.
-fn word_inputs(ui: &mut Ui, words: &mut [Zeroizing<String>]) {
+pub(super) fn word_inputs(ui: &mut Ui, words: &mut [Zeroizing<String>]) {
     widgets::word_grid(ui, words.len(), |ui, index| {
         if let Some(word) = words.get_mut(index) {
             widgets::word_input(ui, index, word);
@@ -201,7 +204,7 @@ fn word_inputs(ui: &mut Ui, words: &mut [Zeroizing<String>]) {
 
 /// Moves the words of an input holding several (a pasted phrase) into it
 /// and the inputs after it, one each; words beyond the last are dropped.
-fn spread_pasted(words: &mut [Zeroizing<String>]) {
+pub(super) fn spread_pasted(words: &mut [Zeroizing<String>]) {
     let Some(start) = words
         .iter()
         .position(|word| word.split_whitespace().nth(1).is_some())
@@ -221,7 +224,7 @@ fn spread_pasted(words: &mut [Zeroizing<String>]) {
 
 /// The phrase as single-spaced lowercase words, or `None` while any input
 /// is blank.
-fn joined_phrase(words: &[Zeroizing<String>]) -> Option<Zeroizing<String>> {
+pub(super) fn joined_phrase(words: &[Zeroizing<String>]) -> Option<Zeroizing<String>> {
     let mut phrase = Zeroizing::new(String::new());
     for word in words {
         let word = Zeroizing::new(word.trim().to_lowercase());

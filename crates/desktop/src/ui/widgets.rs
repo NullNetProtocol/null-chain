@@ -371,8 +371,11 @@ fn control_size() -> egui::Vec2 {
 
 /// A text input for a secret that keeps no undo history of it. `masked`
 /// hides the text; unmasked suits single recovery words being checked.
-pub fn secret_input(ui: &mut Ui, value: &mut Zeroizing<String>, id: &str, masked: bool) {
-    show_without_undo(
+///
+/// Returns whether the user pressed Enter in it, so a form can submit from
+/// the keyboard as well as from its button.
+pub fn secret_input(ui: &mut Ui, value: &mut Zeroizing<String>, id: &str, masked: bool) -> bool {
+    let response = show_without_undo(
         ui,
         egui::TextEdit::singleline(&mut **value)
             .id_salt(id)
@@ -380,6 +383,13 @@ pub fn secret_input(ui: &mut Ui, value: &mut Zeroizing<String>, id: &str, masked
             .desired_width(f32::INFINITY)
             .margin(egui::vec2(theme::SPACE_SM, theme::SPACE_SM)),
     );
+    entered(ui, &response)
+}
+
+/// Whether a single-line input was left by pressing Enter: egui drops its
+/// focus on Enter, so focus lost in the frame Enter was pressed.
+fn entered(ui: &Ui, response: &Response) -> bool {
+    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
 }
 
 /// Shows a text edit holding a secret and drops its undo history, so the
@@ -639,6 +649,46 @@ mod tests {
         assert_eq!(modules.len(), width * width);
         assert!(modules.iter().any(|dark| *dark) && modules.iter().any(|dark| !*dark));
         assert!(qr_modules(&"x".repeat(5000)).is_none());
+    }
+
+    /// Draws one focused secret input for a frame holding `events`.
+    fn secret_frame(ctx: &egui::Context, events: Vec<egui::Event>) -> bool {
+        let mut entered = false;
+        let mut value = Zeroizing::new("pw".to_owned());
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let id = ui.make_persistent_id(egui::Id::new("secret"));
+                    if ctx.memory(|m| m.focused().is_none()) {
+                        ctx.memory_mut(|m| m.request_focus(id));
+                    }
+                    entered = secret_input(ui, &mut value, "secret", true);
+                });
+            },
+        );
+        entered
+    }
+
+    #[test]
+    fn a_secret_input_reports_enter_so_forms_submit_from_the_keyboard() {
+        let ctx = egui::Context::default();
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert!(!secret_frame(&ctx, Vec::new()), "focusing is not entering");
+        assert!(
+            !secret_frame(&ctx, Vec::new()),
+            "typing alone is not entering"
+        );
+        assert!(secret_frame(&ctx, vec![enter]));
     }
 
     #[test]

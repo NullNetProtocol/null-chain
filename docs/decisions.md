@@ -1454,3 +1454,39 @@ exposures separately. `TODO.md` tracks the work; `docs/future.md` holds
 the current technical sketch. The detailed reference protocol, recovery
 limits and proposed NULL adaptation are in
 [atomic-swaps.md](atomic-swaps.md).
+
+## 2026-11-05: Keep the recovery phrase in the wallet file
+
+Alternatives: keep only the spending key (the phrase is shown once and is
+unrecoverable, as before); derive the phrase back from the key, as Monero
+can because its seed encodes the spend key; export the spending key as the
+second backup.
+
+Chosen: seal the phrase's entropy and account, under the file key with its
+own record tag, in the `meta` table, and show it again only after the
+passphrase is entered again, even on an unlocked wallet. Our phrase goes
+through BIP 39 PBKDF2 and ZIP 32 hardened derivation, so the key cannot be
+turned back into words; storing them is the only way. Users lose paper
+backups and expect wallets (Monero, Electrum, zcashd) to show the seed again.
+Cost: a stolen file and passphrase now expose every account of the seed,
+not only the one in the file; the same passphrase already protects the
+spending key that holds the funds. Files from before this keep no phrase.
+They can attach one, which is accepted only if it derives the file's own
+spending key (constant-time comparison), so attaching cannot plant someone
+else's backup. The desktop console refuses the two methods because it keeps
+a history; RPC clients need the passphrase as well as the token.
+
+## 2026-11-05: Desktop snapshots off the command loop
+
+Alternatives: keep one serial loop (simple, but every command waits for
+the current snapshot, and during sync each of its node requests waits
+behind block imports); make the node answer reads outside its event loop
+(the real fix for node latency, larger and in consensus-adjacent code).
+
+Chosen: build snapshots on their own task and run calls on a bounded set
+of tasks, leaving only actions that change ownership (unlock, lock, mining,
+log, recovery phrase) on the loop. Every action advances an epoch and a
+snapshot started in an older epoch is dropped, so wallet data cannot appear
+after a lock. Lock cancels the snapshot and waits for calls, keeping the
+rule that no task holds the wallet once lock returns. The node change
+remains on the roadmap.

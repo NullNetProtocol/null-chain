@@ -4,7 +4,7 @@
 //!
 //! | table | key | value |
 //! |---|---|---|
-//! | `meta` | name | salt, encrypted spending key, fingerprint, genesis |
+//! | `meta` | name | salt, encrypted spending key, encrypted seed phrase (optional), fingerprint, genesis |
 //! | `notes` | tree position | encrypted owned note |
 //! | `heights` | height | block hash, tree size before the block |
 //! | `shards`, `cap`, `checkpoints` | see [`crate::tree`] | the witness tree |
@@ -44,11 +44,15 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::keys::WalletKeys;
 use crate::operations::{Operation, OperationStatus};
 use crate::scan::{scan_block, scan_compact_block, BlockScan, OwnedNote};
+use crate::seed::AccountPhrase;
 use crate::spend::Payment;
 use crate::tree::{
     anchor_of, retention, to_merkle_path, witness_tree, WitnessTree, CAP, CHECKPOINTS, SHARDS,
 };
 use crate::{Error, Result};
+use recovery::seal_phrase;
+
+mod recovery;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const NOTES: TableDefinition<u64, &[u8]> = TableDefinition::new("notes");
@@ -62,6 +66,10 @@ const SALT: &str = "salt";
 const SPENDING_KEY: &str = "spending_key";
 /// The sealed full viewing key of a watch-only wallet.
 const FULL_VIEWING_KEY: &str = "full_viewing_key";
+/// The sealed seed phrase and account the spending key came from. Wallets
+/// created from a spending key, and those created before the phrase was
+/// kept, have none until one is attached.
+const SEED_PHRASE: &str = "seed_phrase";
 const FINGERPRINT: &str = "fingerprint";
 const GENESIS: &str = "genesis";
 /// The next diversifier index to hand out; index zero is the default
@@ -88,6 +96,8 @@ const TAG_LABEL: u8 = 2;
 const TAG_OPERATION: u8 = 3;
 /// Record tag of the full viewing key of a watch-only wallet.
 const TAG_VIEWING_KEY: u8 = 4;
+/// Record tag of the seed phrase.
+const TAG_SEED_PHRASE: u8 = 5;
 /// Length of the random nonce stored ahead of every ciphertext.
 const NONCE_LEN: usize = 12;
 /// Version of the sealed record layout, authenticated with every record.
@@ -262,7 +272,23 @@ impl Wallet {
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Result<Self> {
         let keys = WalletKeys::from_spending_key(sk.clone())?;
-        Self::create_with(path, keys, genesis, passphrase, rng)
+        Self::create_with(path, keys, None, genesis, passphrase, rng)
+    }
+
+    /// Creates a new wallet file for the spending key of `phrase`, keeping
+    /// the phrase sealed in the file so it can be shown again.
+    ///
+    /// # Errors
+    /// As [`Self::create`].
+    pub fn create_from_phrase(
+        path: impl AsRef<Path>,
+        phrase: &AccountPhrase,
+        genesis: BlockHash,
+        passphrase: &[u8],
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<Self> {
+        let keys = WalletKeys::from_spending_key(phrase.spending_key()?)?;
+        Self::create_with(path, keys, Some(phrase), genesis, passphrase, rng)
     }
 
     /// Creates a watch-only wallet file from a full viewing key: it finds
@@ -278,12 +304,13 @@ impl Wallet {
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Result<Self> {
         let keys = WalletKeys::from_full_viewing_key(fvk)?;
-        Self::create_with(path, keys, genesis, passphrase, rng)
+        Self::create_with(path, keys, None, genesis, passphrase, rng)
     }
 
     fn create_with(
         path: impl AsRef<Path>,
         keys: WalletKeys,
+        phrase: Option<&AccountPhrase>,
         genesis: BlockHash,
         passphrase: &[u8],
         rng: &mut (impl RngCore + CryptoRng),
@@ -292,7 +319,7 @@ impl Wallet {
         let mut salt = [0u8; SALT_LEN];
         rng.fill_bytes(&mut salt);
         let file_key = FileKey::derive(passphrase, &salt)?;
-        Self::init(db, keys, genesis, file_key, Some(&salt))
+        Self::init(db, keys, phrase, genesis, file_key, Some(&salt))
     }
 
     /// Opens a wallet file, deriving the file key from `passphrase`.
@@ -355,7 +382,7 @@ impl Wallet {
     ) -> Result<Self> {
         let db = Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
         let keys = WalletKeys::from_spending_key(sk.clone())?;
-        Self::init(db, keys, genesis, FileKey::random(rng), None)
+        Self::init(db, keys, None, genesis, FileKey::random(rng), None)
     }
 
     /// A watch-only wallet that lives only in memory.
@@ -369,12 +396,13 @@ impl Wallet {
     ) -> Result<Self> {
         let db = Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
         let keys = WalletKeys::from_full_viewing_key(fvk)?;
-        Self::init(db, keys, genesis, FileKey::random(rng), None)
+        Self::init(db, keys, None, genesis, FileKey::random(rng), None)
     }
 
     fn init(
         db: Database,
         keys: WalletKeys,
+        phrase: Option<&AccountPhrase>,
         genesis: BlockHash,
         file_key: FileKey,
         salt: Option<&[u8]>,
@@ -389,6 +417,7 @@ impl Wallet {
                 file_key.seal(TAG_VIEWING_KEY, 0, &keys.full_viewing_key().to_bytes())?,
             ),
         };
+        let sealed_phrase = phrase.map(|p| seal_phrase(&file_key, p)).transpose()?;
         let tx = db.begin_write()?;
         {
             let mut meta = tx.open_table(META)?;
@@ -404,6 +433,9 @@ impl Wallet {
             }
             meta.insert(SALT, salt.unwrap_or(&[]))?;
             meta.insert(sealed_key.0, sealed_key.1.as_slice())?;
+            if let Some(sealed) = &sealed_phrase {
+                meta.insert(SEED_PHRASE, sealed.as_slice())?;
+            }
             meta.insert(FINGERPRINT, fingerprint(&keys).as_slice())?;
             meta.insert(GENESIS, genesis.as_bytes().as_slice())?;
         }

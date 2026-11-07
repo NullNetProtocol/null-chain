@@ -1,9 +1,15 @@
 //! One owner for the embedded node, unlocked wallet, and RPC listener.
 //!
 //! GUI actions and HTTP calls enter the same bounded command queue. Only
-//! this task owns the wallet service; locking waits for its worker to finish.
+//! this task owns the wallet service. Calls and snapshot refreshes run on
+//! their own tasks so a slow node, busy importing blocks while it syncs,
+//! never holds up unlocking, locking or the next command; locking waits for
+//! every one of them, and for the wallet worker, before the keys are gone.
+
+mod refresh;
 
 use std::net::SocketAddr;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -11,20 +17,30 @@ use null_chain::genesis::genesis;
 use null_node::config::{Config as NodeConfig, Network};
 use null_node::jsonrpc::{self, Context, Dispatch, Params, RpcError, REJECTED};
 use null_node::miner::{self, Miner};
-use null_node::node::{self, Request, Response};
+use null_node::node;
 use null_node::rpc::{Source, Token};
-use null_node::walletd::{self, Service, ServiceConfig};
+use null_node::walletd::{self, Service, ServiceConfig, SECRET_METHODS};
 use null_node::{Error, Result};
-use null_wallet::seed::SeedPhrase;
+use null_wallet::seed::{AccountPhrase, SeedPhrase};
 use null_wallet::wallet::Wallet;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use zeroize::Zeroizing;
 
-use crate::block_times::{BlockFacts, BlockTimes, LOOKUPS_PER_REFRESH};
+use crate::block_times::BlockTimes;
 use crate::config::{self, LogFile, Mining};
+use refresh::{Built, Inputs, MiningView, Refresh, Services};
+
+/// The seed account the desktop wallet uses.
+const ACCOUNT: u32 = 0;
+/// Calls run at once; more wait for one to finish, so a flood of RPC
+/// requests cannot spawn without bound.
+const MAX_CONCURRENT_CALLS: usize = 16;
+/// Why the debug console cannot run a seed phrase method.
+pub const SECRET_REFUSED: &str =
+    "Use the Backup page to show or store the recovery phrase; the console keeps a history.";
 
 /// Desktop configuration; the node has no separate control socket.
 pub struct Config {
@@ -71,7 +87,20 @@ pub enum Action {
     SetMining(Mining),
     /// Start or stop writing the log file. The choice is saved.
     SetLogFile(bool),
-    /// Invoke a method on the same services used by HTTP RPC.
+    /// Show the recovery phrase the wallet file keeps, after checking the
+    /// passphrase again; it arrives in [`Outcome::phrase`].
+    RevealSeed {
+        /// Wallet file encryption passphrase.
+        passphrase: Zeroizing<String>,
+    },
+    /// Store the recovery phrase in a wallet file created before phrases
+    /// were kept. It must derive the wallet's own spending key.
+    AttachSeed {
+        /// The recovery words, space separated.
+        phrase: Zeroizing<String>,
+    },
+    /// Invoke a method on the same services used by HTTP RPC. Methods that
+    /// carry the recovery phrase are refused: use the actions above.
     Call {
         /// RPC method name.
         method: String,
@@ -84,8 +113,12 @@ pub enum Action {
 pub struct Outcome {
     /// User-facing result.
     pub message: String,
-    /// Newly generated recovery phrase, when creating a wallet.
+    /// The recovery phrase: newly generated when creating a wallet, or
+    /// the stored one for [`Action::RevealSeed`].
     pub phrase: Option<Zeroizing<String>>,
+    /// The seed account a revealed phrase restores: a wallet made with
+    /// `nulld create --account` uses another than the desktop's 0.
+    pub account: Option<u32>,
     /// Result of an [`Action::Call`]; `null` for other actions.
     pub value: Value,
 }
@@ -95,6 +128,7 @@ impl Outcome {
         Self {
             message: message.into(),
             phrase: None,
+            account: None,
             value: Value::Null,
         }
     }
@@ -132,16 +166,14 @@ pub struct Snapshot {
     pub error: Option<String>,
 }
 
+/// Where a GUI action's result goes.
+type ActionReply = oneshot::Sender<std::result::Result<Outcome, String>>;
+/// Where an RPC call's result goes.
+type RpcReply = oneshot::Sender<std::result::Result<Value, RpcError>>;
+
 enum Command {
-    Action(
-        Action,
-        oneshot::Sender<std::result::Result<Outcome, String>>,
-    ),
-    Rpc(
-        String,
-        Params,
-        oneshot::Sender<std::result::Result<Value, RpcError>>,
-    ),
+    Action(Action, ActionReply),
+    Rpc(String, Params, RpcReply),
 }
 
 /// A cloneable command sender; holds no wallet or database references.
@@ -228,13 +260,24 @@ struct State {
     node: node::Handle,
     context: Context,
     network: Network,
+    addr: SocketAddr,
     wallet: Option<Service>,
     wallet_path: PathBuf,
     miner: Option<Miner>,
     mining: Mining,
     log: LogFile,
     settings: PathBuf,
+    /// Block facts for dating notes; lent to the running refresh.
     block_times: BlockTimes,
+    /// Calls in flight. Each holds the wallet daemon until it finishes.
+    calls: JoinSet<()>,
+    /// The snapshot being built.
+    refresh: Option<Refresh>,
+    /// Advanced by every action, so a snapshot begun before one is dropped
+    /// instead of showing, say, wallet data after a lock.
+    epoch: u64,
+    /// Whether another snapshot should follow the running one.
+    stale: bool,
 }
 
 async fn run(
@@ -282,6 +325,7 @@ async fn run(
         node,
         context,
         network,
+        addr,
         wallet: None,
         wallet_path: config.wallet,
         miner: None,
@@ -289,6 +333,10 @@ async fn run(
         log: config.log,
         settings: config.settings,
         block_times: BlockTimes::default(),
+        calls: JoinSet::new(),
+        refresh: None,
+        epoch: 0,
+        stale: false,
     };
     let server = tokio::spawn(jsonrpc::serve_with(listener, token, client));
     let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -298,28 +346,18 @@ async fn run(
             biased;
             _ = &mut stopped => break,
             command = commands.recv() => match command {
-                Some(Command::Action(action, reply)) => {
-                    let stop = matches!(&action, Action::Call { method, .. } if method == "stop");
-                    let result = if stop {
-                        Ok(Outcome { value: json!("stopping"), ..Outcome::message("Stopping") })
-                    } else {
-                        state.action(action).await.map_err(|e| e.to_string())
-                    };
-                    let _ = reply.send(result);
-                    if stop { break; }
-                    state.publish(updates, addr).await;
-                }
-                Some(Command::Rpc(method, params, reply)) => {
-                    // Stop means the entire desktop backend, including wallet.
-                    let stop = method == "stop";
-                    let result = if stop { Ok(json!("stopping")) }
-                        else { state.call(&method, &params).await };
-                    let _ = reply.send(result);
-                    if stop { break; }
+                Some(command) => {
+                    if state.command(command, updates).await.is_break() {
+                        break;
+                    }
                 }
                 None => break,
             },
-            _ = interval.tick() => state.publish(updates, addr).await,
+            (epoch, built) = refresh::finished(&mut state.refresh) => {
+                state.refreshed(epoch, built, updates);
+            }
+            Some(_) = state.calls.join_next() => {}
+            _ = interval.tick() => state.start_refresh(),
         }
     }
     server.abort();
@@ -335,13 +373,208 @@ async fn run(
 }
 
 impl State {
+    /// Handles one queued command; breaks the loop on `stop`.
+    async fn command(
+        &mut self,
+        command: Command,
+        updates: &watch::Sender<Snapshot>,
+    ) -> ControlFlow<()> {
+        match command {
+            // Stop means the entire desktop backend, including wallet.
+            Command::Action(Action::Call { method, .. }, reply) if method == "stop" => {
+                let _ = reply.send(Ok(Outcome {
+                    value: json!("stopping"),
+                    ..Outcome::message("Stopping")
+                }));
+                ControlFlow::Break(())
+            }
+            Command::Rpc(method, _, reply) if method == "stop" => {
+                let _ = reply.send(Ok(json!("stopping")));
+                ControlFlow::Break(())
+            }
+            Command::Action(Action::Call { method, params }, reply) => {
+                if SECRET_METHODS.contains(&method.as_str()) {
+                    let _ = reply.send(Err(SECRET_REFUSED.into()));
+                } else {
+                    self.spawn_call(method, Params::new(params), move |result| {
+                        let _ = reply.send(gui_result(result));
+                    })
+                    .await;
+                }
+                ControlFlow::Continue(())
+            }
+            Command::Rpc(method, params, reply) => {
+                self.spawn_call(method, params, move |result| {
+                    let _ = reply.send(result);
+                })
+                .await;
+                ControlFlow::Continue(())
+            }
+            Command::Action(action, reply) => {
+                let outcome = self.action(action).await.map_err(|e| e.to_string());
+                // Answer after publishing, so the GUI that hears "unlocked"
+                // already has the wallet to show.
+                self.changed(updates).await;
+                let _ = reply.send(outcome);
+                ControlFlow::Continue(())
+            }
+        }
+    }
+
+    /// Runs a call on its own task, waiting first while too many run.
+    async fn spawn_call(
+        &mut self,
+        method: String,
+        params: Params,
+        deliver: impl FnOnce(std::result::Result<Value, RpcError>) + Send + 'static,
+    ) {
+        while self.calls.len() >= MAX_CONCURRENT_CALLS {
+            self.calls.join_next().await;
+        }
+        let services = self.services();
+        self.calls
+            .spawn(async move { deliver(services.call(&method, &params).await) });
+    }
+
+    /// The node and, while unlocked, the wallet daemon.
+    fn services(&self) -> Services {
+        Services {
+            context: self.context.clone(),
+            wallet: self.wallet.as_ref().map(|service| service.daemon.clone()),
+        }
+    }
+
+    /// After an action: drop snapshots begun before it, show at once what
+    /// needs no node call, and build a fresh snapshot.
+    async fn changed(&mut self, updates: &watch::Sender<Snapshot>) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.stale = true;
+        self.publish_local(updates, None);
+        self.publish_wallet(updates).await;
+        self.start_refresh();
+    }
+
+    /// Publishes the unlocked wallet's own fields without waiting for the
+    /// full snapshot, whose node calls queue behind block imports while
+    /// syncing: unlocking shows the wallet at once instead of after them.
+    /// A failure is left for the full snapshot to report. Received notes
+    /// are only filled when none are shown: actions do not change them,
+    /// and the copy here lacks the block times a running refresh holds.
+    async fn publish_wallet(&self, updates: &watch::Sender<Snapshot>) {
+        let Some(service) = &self.wallet else {
+            return;
+        };
+        let mut fields = Snapshot::default();
+        if refresh::wallet_fields(&service.daemon, &mut fields)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        self.block_times.annotate(
+            &mut fields.received,
+            self.network.params().coinbase_maturity,
+        );
+        updates.send_modify(|s| {
+            s.wallet = fields.wallet;
+            s.balance = fields.balance;
+            s.addresses = fields.addresses;
+            s.operations = fields.operations;
+            if s.received.is_null() {
+                s.received = fields.received;
+            }
+        });
+    }
+
+    /// Starts a snapshot unless one is being built.
+    fn start_refresh(&mut self) {
+        if self.refresh.is_some() {
+            return;
+        }
+        self.stale = false;
+        let inputs = Inputs {
+            services: self.services(),
+            mining: self.mining_view(),
+            wallet_path: self.wallet_path.clone(),
+            addr: self.addr,
+            network: self.network,
+            log_file: self.log.enabled,
+            block_times: std::mem::take(&mut self.block_times),
+        };
+        self.refresh = Some(Refresh::spawn(self.epoch, inputs));
+    }
+
+    /// Publishes a finished snapshot unless an action came after it began.
+    fn refreshed(
+        &mut self,
+        epoch: u64,
+        built: std::result::Result<Built, tokio::task::JoinError>,
+        updates: &watch::Sender<Snapshot>,
+    ) {
+        self.refresh = None;
+        // The cache holds chain facts, valid across epochs: a lock cancels
+        // its refresh before clearing it, so no wallet's lookups leak over.
+        let built = built.map(|(snapshot, block_times)| {
+            self.block_times = block_times;
+            snapshot
+        });
+        if epoch == self.epoch {
+            match built {
+                Ok(Ok(snapshot)) => {
+                    updates.send_replace(snapshot);
+                }
+                Ok(Err(error)) => self.publish_local(updates, Some(error.message)),
+                Err(error) => self.publish_local(updates, Some(error.to_string())),
+            }
+        }
+        if self.stale {
+            self.start_refresh();
+        }
+    }
+
+    /// Updates what this task knows without a node call: whether a wallet
+    /// file exists and, when locked, hiding every wallet field.
+    fn publish_local(&self, updates: &watch::Sender<Snapshot>, error: Option<String>) {
+        updates.send_modify(|s| {
+            s.wallet_present = self.wallet_path.try_exists().unwrap_or(s.wallet_present);
+            if self.wallet.is_none() {
+                s.wallet = None;
+                s.balance = Value::Null;
+                s.addresses = Value::Null;
+                s.operations = Value::Null;
+                s.received = Value::Null;
+            }
+            if error.is_some() {
+                s.error = error;
+            }
+        });
+    }
+
+    /// Waits for every call and stops the refresh, so no task still holds
+    /// the wallet.
+    async fn drain(&mut self) {
+        if let Some(refresh) = self.refresh.take() {
+            refresh.cancel().await;
+        }
+        while self.calls.join_next().await.is_some() {}
+    }
+
     async fn lock(&mut self) {
         // The miner pays the wallet's address, so it stops with the wallet.
         self.stop_mining();
+        self.epoch = self.epoch.wrapping_add(1);
+        self.drain().await;
         self.block_times.clear();
         if let Some(service) = self.wallet.take() {
             service.shutdown().await;
         }
+    }
+
+    /// The unlocked wallet service.
+    fn unlocked(&self) -> Result<&Service> {
+        self.wallet
+            .as_ref()
+            .ok_or_else(|| Error::Argument("unlock your wallet first".into()))
     }
 
     /// Asks the miner to stop and lets its workers finish in the
@@ -373,6 +606,20 @@ impl State {
             self.node.tip(),
         ));
         Ok(())
+    }
+
+    /// The miner's state for the next snapshot.
+    fn mining_view(&self) -> MiningView {
+        let prefix = self.network.address_prefix();
+        MiningView {
+            enabled: self.mining.enabled,
+            active: self.miner.is_some(),
+            threads: self
+                .miner
+                .as_ref()
+                .map_or(self.mining.threads, |m| m.threads),
+            payout: self.miner.as_ref().map(|m| m.payout.encode(prefix)),
+        }
     }
 
     /// Applies and saves a mining choice. Mining keeps its new state even
@@ -420,182 +667,104 @@ impl State {
         ))
     }
 
+    async fn open(&mut self, passphrase: Zeroizing<String>, mode: OpenMode) -> Result<Outcome> {
+        if self.wallet.is_some() {
+            return Err(Error::Argument("lock the current wallet first".into()));
+        }
+        let network = self.network;
+        let path = self.wallet_path.clone();
+        let (wallet, phrase) =
+            tokio::task::spawn_blocking(move || open_wallet(path, &passphrase, mode, network))
+                .await
+                .map_err(|_| Error::Stopped)??;
+        self.wallet = Some(walletd::start(ServiceConfig {
+            wallet,
+            network,
+            node: Source::Embedded(self.node.events()),
+            sync_interval: Duration::from_secs(1),
+            light: false,
+        }));
+        if self.mining.enabled {
+            self.start_mining(self.mining.threads)?;
+        }
+        Ok(Outcome {
+            phrase,
+            ..Outcome::message("Wallet unlocked")
+        })
+    }
+
+    async fn reveal_seed(&self, passphrase: Zeroizing<String>) -> Result<Outcome> {
+        let stored = self
+            .unlocked()?
+            .daemon
+            .reveal_seed_phrase(passphrase)
+            .await
+            .map_err(rpc_failure)?;
+        Ok(Outcome {
+            phrase: Some(stored.phrase.words()),
+            account: Some(stored.account),
+            ..Outcome::message("Recovery phrase shown")
+        })
+    }
+
+    async fn attach_seed(&self, words: &str) -> Result<Outcome> {
+        let phrase = AccountPhrase {
+            phrase: SeedPhrase::parse(words)?,
+            account: ACCOUNT,
+        };
+        self.unlocked()?
+            .daemon
+            .attach_seed_phrase(phrase)
+            .await
+            .map_err(|error| Error::Argument(attach_failure(error.message)))?;
+        Ok(Outcome::message("Recovery phrase stored"))
+    }
+
+    /// Runs an action other than a call, which [`Self::command`] spawns.
     async fn action(&mut self, action: Action) -> Result<Outcome> {
         match action {
             Action::Lock => {
                 self.lock().await;
                 Ok(Outcome::message("Wallet locked"))
             }
-            Action::Open { passphrase, mode } => {
-                if self.wallet.is_some() {
-                    return Err(Error::Argument("lock the current wallet first".into()));
-                }
-                let network = self.network;
-                let path = self.wallet_path.clone();
-                let (wallet, phrase) = tokio::task::spawn_blocking(move || {
-                    open_wallet(path, &passphrase, mode, network)
-                })
-                .await
-                .map_err(|_| Error::Stopped)??;
-                self.wallet = Some(walletd::start(ServiceConfig {
-                    wallet,
-                    network,
-                    node: Source::Embedded(self.node.events()),
-                    sync_interval: Duration::from_secs(1),
-                    light: false,
-                }));
-                if self.mining.enabled {
-                    self.start_mining(self.mining.threads)?;
-                }
-                Ok(Outcome {
-                    phrase,
-                    ..Outcome::message("Wallet unlocked")
-                })
-            }
+            Action::Open { passphrase, mode } => self.open(passphrase, mode).await,
             Action::SetMining(mining) => self.set_mining(mining),
             Action::SetLogFile(enabled) => self.set_log_file(enabled),
-            Action::Call { method, params } => {
-                let result = self
-                    .call(&method, &Params::new(params))
-                    .await
-                    .map_err(|e| Error::Argument(e.message))?;
-                Ok(Outcome {
-                    value: result,
-                    ..Outcome::message("Done")
-                })
-            }
+            Action::RevealSeed { passphrase } => self.reveal_seed(passphrase).await,
+            Action::AttachSeed { phrase } => self.attach_seed(&phrase).await,
+            Action::Call { .. } => Err(Error::Argument("calls run on their own task".into())),
         }
     }
+}
 
-    async fn call(&self, method: &str, params: &Params) -> std::result::Result<Value, RpcError> {
-        if method == "stop" {
-            return Err(RpcError::new(
-                REJECTED,
-                "stop is handled by the application lifecycle",
-            ));
-        }
-        // Wallet semantics win for overlapping names such as gettransaction.
-        // Prefix node methods with node. to disambiguate them.
-        if let Some(method) = method.strip_prefix("node.") {
-            if method == "stop" {
-                return Err(RpcError::new(
-                    REJECTED,
-                    "use stop to shut down the whole application",
-                ));
-            }
-            return self.context.call(method, params).await;
-        }
-        if method == "help" {
-            return Ok(json!({ "node": self.context.call("help", params).await?,
-                "wallet": walletd::METHODS, "node_prefix": "node." }));
-        }
-        if walletd::METHODS.contains(&method) {
-            let service = self
-                .wallet
-                .as_ref()
-                .ok_or_else(|| RpcError::new(REJECTED, "wallet is locked"))?;
-            service.daemon.call(method, params).await
-        } else {
-            self.context.call(method, params).await
-        }
-    }
+/// A call's result as the GUI receives it.
+fn gui_result(
+    result: std::result::Result<Value, RpcError>,
+) -> std::result::Result<Outcome, String> {
+    result
+        .map(|value| Outcome {
+            value,
+            ..Outcome::message("Done")
+        })
+        .map_err(|error| rpc_failure(error).to_string())
+}
 
-    async fn snapshot(&mut self, addr: SocketAddr) -> std::result::Result<Snapshot, RpcError> {
-        let params = Params::new(json!([]));
-        let mut snapshot = Snapshot {
-            ready: true,
-            rpc: Some(addr),
-            wallet_present: self.wallet_path.try_exists().map_err(Error::from)?,
-            node: self.context.call("getblockchaininfo", &params).await?,
-            ..Snapshot::default()
-        };
-        if let Some(info) = snapshot.node.as_object_mut() {
-            info.insert(
-                "peers".into(),
-                self.context.call("getpeerinfo", &params).await?,
-            );
-        }
-        snapshot.mining = self.mining_json().await?;
-        snapshot.log_file = self.log.enabled;
-        if let Some(service) = &self.wallet {
-            snapshot.wallet = Some(service.daemon.call("getwalletinfo", &params).await?);
-            snapshot.balance = service.daemon.call("getbalance", &params).await?;
-            snapshot.addresses = service.daemon.call("listaddresses", &params).await?;
-            snapshot.operations = service.daemon.call("listoperations", &params).await?;
-            snapshot.received = service.daemon.call("listreceived", &params).await?;
-            self.date_notes(&mut snapshot.received).await?;
-        }
-        Ok(snapshot)
+/// Explains a phrase that does not match: the desktop stores account 0
+/// only, and a wallet from `nulld create --account` needs the CLI.
+fn attach_failure(message: String) -> String {
+    if message == null_wallet::Error::SeedMismatch.to_string() {
+        format!(
+            "{message}. This page stores account {ACCOUNT}; for a wallet created with \
+             nulld create --account, use nulld attach-seed --account"
+        )
+    } else {
+        message
     }
+}
 
-    /// Adds block times to received notes, reading blocks it has not cached
-    /// yet and dropping cached ones a reorganization replaced.
-    async fn date_notes(&mut self, notes: &mut Value) -> std::result::Result<(), RpcError> {
-        let params = self.network.params();
-        if let Response::Status { height, hash, .. } = self.node.request(Request::Status).await? {
-            for stale in self
-                .block_times
-                .follow_tip(hash, height, params.max_reorg_depth)
-            {
-                let current = match self.node.request(Request::Hash(stale)).await? {
-                    Response::Hash(hash) => hash,
-                    _ => None,
-                };
-                if current != self.block_times.get(stale).map(|b| b.hash) {
-                    self.block_times.remove(stale);
-                }
-            }
-        }
-        let maturity = params.coinbase_maturity;
-        for height in self
-            .block_times
-            .missing(notes, maturity, LOOKUPS_PER_REFRESH)
-        {
-            if let Response::Block(Some(block)) = self.node.request(Request::Block(height)).await? {
-                self.block_times.insert(height, BlockFacts::from(&*block));
-            }
-        }
-        self.block_times.annotate(notes, maturity);
-        Ok(())
-    }
-
-    async fn mining_json(&self) -> std::result::Result<Value, RpcError> {
-        let (found, in_chain, waits) = match self.node.request(Request::Metrics).await? {
-            Response::Metrics(m) => (m.blocks_mined, m.blocks_mined_in_chain, m.mining_waits),
-            _ => (0, 0, None),
-        };
-        let prefix = self.network.address_prefix();
-        Ok(json!({
-            "enabled": self.mining.enabled,
-            "active": self.miner.is_some(),
-            "threads": self.miner.as_ref().map_or(self.mining.threads, |m| m.threads),
-            "max_threads": config::max_mining_threads(),
-            "payout": self.miner.as_ref().map(|m| m.payout.encode(prefix)),
-            "found": found,
-            "in_chain": in_chain,
-            "waiting": waits.map(|reason| reason.to_string()),
-        }))
-    }
-
-    async fn publish(&mut self, updates: &watch::Sender<Snapshot>, addr: SocketAddr) {
-        match self.snapshot(addr).await {
-            Ok(snapshot) => {
-                updates.send_replace(snapshot);
-            }
-            Err(error) => updates.send_modify(|s| {
-                s.wallet_present = self.wallet_path.try_exists().unwrap_or(s.wallet_present);
-                // Lock must hide wallet state even when the node failed.
-                if self.wallet.is_none() {
-                    s.wallet = None;
-                    s.balance = Value::Null;
-                    s.addresses = Value::Null;
-                    s.operations = Value::Null;
-                    s.received = Value::Null;
-                }
-                s.error = Some(error.message);
-            }),
-        }
-    }
+/// An RPC failure as a backend error, keeping its message.
+fn rpc_failure(error: RpcError) -> Error {
+    Error::Argument(error.message)
 }
 
 fn open_wallet(
@@ -621,14 +790,18 @@ fn open_wallet(
         OpenMode::Restore(words) => (SeedPhrase::parse(&words)?, false),
         OpenMode::Existing => return Err(Error::Argument("expected a new wallet".into())),
     };
-    let wallet = Wallet::create(
+    let phrase = AccountPhrase {
+        phrase: seed,
+        account: ACCOUNT,
+    };
+    let wallet = Wallet::create_from_phrase(
         path,
-        &seed.spending_key(0)?,
+        &phrase,
         genesis,
         passphrase.as_bytes(),
         &mut rand::rngs::OsRng,
     )?;
-    Ok((wallet, fresh.then(|| seed.words())))
+    Ok((wallet, fresh.then(|| phrase.phrase.words())))
 }
 
 #[cfg(test)]
@@ -642,6 +815,7 @@ mod tests {
         let restored = directory.path().join("restored.redb");
         let (wallet, phrase) =
             open_wallet(path.clone(), "password", OpenMode::Create, Network::Test).unwrap();
+        let phrase_words = phrase.clone().unwrap();
         let address = wallet.keys().default_address().unwrap();
         drop(wallet);
         assert!(open_wallet(path.clone(), "password", OpenMode::Create, Network::Test).is_err());
@@ -656,6 +830,17 @@ mod tests {
         .unwrap();
         assert!(shown.is_none());
         assert_eq!(wallet.keys().default_address().unwrap(), address);
+        let kept = wallet.reveal_seed_phrase(b"new password").unwrap().unwrap();
+        assert_eq!(kept.account, ACCOUNT);
+        assert_eq!(*kept.phrase.words(), *phrase_words);
+    }
+
+    #[test]
+    fn a_mismatched_phrase_points_to_the_cli_for_other_accounts() {
+        let mismatch = null_wallet::Error::SeedMismatch.to_string();
+        assert!(attach_failure(mismatch.clone()).starts_with(&mismatch));
+        assert!(attach_failure(mismatch).contains("nulld attach-seed --account"));
+        assert_eq!(attach_failure("wallet is busy".into()), "wallet is busy");
     }
 
     #[test]

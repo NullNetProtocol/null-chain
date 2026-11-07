@@ -3,7 +3,8 @@
 use std::collections::VecDeque;
 
 use eframe::egui::{self, Key, Ui};
-use null_desktop::backend::Snapshot;
+use null_desktop::backend::{Snapshot, SECRET_REFUSED};
+use null_node::walletd::SECRET_METHODS;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
@@ -210,7 +211,18 @@ impl Form {
         if command.is_empty() {
             return None;
         }
-        let parsed = parse(&command);
+        // Record only the method of a secret command, whether or not its
+        // arguments parse: they are a passphrase or the phrase itself.
+        let method = method_token(&command);
+        let (command, parsed) = if is_secret(method) {
+            (
+                Zeroizing::new(method.to_owned()),
+                Err(SECRET_REFUSED.to_owned()),
+            )
+        } else {
+            let parsed = parse(&command);
+            (command, parsed)
+        };
         let (output, error) = match &parsed {
             Ok(_) => ("Running…".into(), false),
             Err(error) => (error.clone(), true),
@@ -287,6 +299,19 @@ impl Form {
     }
 }
 
+/// The first word of a command, where the method goes, before any parsing.
+fn method_token(command: &str) -> &str {
+    let command = command.trim_start();
+    let split = command.find(char::is_whitespace).unwrap_or(command.len());
+    command.get(..split).unwrap_or_default()
+}
+
+/// Whether the console refuses `method` because it carries the recovery
+/// phrase or the passphrase that reveals it.
+fn is_secret(method: &str) -> bool {
+    SECRET_METHODS.contains(&method)
+}
+
 /// Complete only the method token; argument text is never a search query.
 fn matching_methods(input: &str) -> Vec<String> {
     let prefix = input.trim_start();
@@ -296,6 +321,7 @@ fn matching_methods(input: &str) -> Vec<String> {
     let mut methods: Vec<String> = null_node::jsonrpc::METHODS
         .iter()
         .chain(null_node::walletd::METHODS)
+        .filter(|method| !is_secret(method))
         .map(|method| (*method).into())
         .collect();
     methods.extend(
@@ -334,8 +360,8 @@ fn syntax_help(ui: &mut Ui) {
 /// RPC syntax only: a method followed by JSON params or individual arguments.
 fn parse(command: &str) -> Result<(String, Value), String> {
     let command = command.trim();
-    let split = command.find(char::is_whitespace).unwrap_or(command.len());
-    let method = command.get(..split).unwrap_or_default();
+    let method = method_token(command);
+    let split = method.len();
     if method.is_empty()
         || !method
             .chars()
@@ -434,6 +460,34 @@ mod tests {
         ] {
             assert!(parse(command).is_err(), "{command}");
         }
+    }
+
+    #[test]
+    fn seed_phrase_methods_are_refused_without_recording_their_arguments() {
+        let mut form = Form {
+            input: Zeroizing::new("getseedphrase \"my passphrase\"".into()),
+            ..Form::default()
+        };
+        assert!(form.execute().is_none());
+        assert_eq!(&*form.entries[0].command, "getseedphrase");
+        assert!(form.entries[0].error);
+        assert_eq!(&*form.entries[0].output, SECRET_REFUSED);
+        for unparsable in [
+            "getseedphrase \"my passphrase",
+            "setseedphrase {abandon",
+            "  getseedphrase\t[\"pw\"",
+        ] {
+            form.input = Zeroizing::new(unparsable.into());
+            assert!(form.execute().is_none());
+            let entry = form.entries.back().unwrap();
+            assert!(!entry.command.contains("pass") && !entry.command.contains("abandon"));
+            assert!(!entry.command.contains('"') && !entry.command.contains('['));
+            assert_eq!(&*entry.output, SECRET_REFUSED);
+        }
+        assert_eq!(method_token("  getblockhash 0"), "getblockhash");
+        assert_eq!(method_token("help"), "help");
+        assert!(matching_methods("getseed").is_empty());
+        assert!(matching_methods("setseed").is_empty());
     }
 
     #[test]

@@ -401,6 +401,14 @@ async fn automatic_setup_recognizes_the_wallet_after_restart_and_import_restores
         "an existing wallet cannot be replaced by onboarding"
     );
     assert!(open(&backend, OpenMode::Existing).await.phrase.is_none());
+    {
+        // Shown as soon as the unlock answers, before any node-backed
+        // snapshot: while syncing, those wait behind block imports.
+        let shown = backend.snapshots.borrow();
+        assert!(shown.wallet.is_some());
+        assert_eq!(shown.addresses[0]["address"], address);
+        assert!(!shown.balance.is_null() && shown.received.is_array());
+    }
     assert_eq!(default_address(&backend).await, address);
     backend.shutdown().await.unwrap();
 
@@ -416,6 +424,111 @@ async fn automatic_setup_recognizes_the_wallet_after_restart_and_import_restores
     assert_eq!(default_address(&backend).await, address);
     assert!(backend.snapshots.borrow().wallet_present);
     assert!(imported_path.is_file());
+    backend.shutdown().await.unwrap();
+}
+
+async fn submit(
+    backend: &Backend,
+    action: Action,
+) -> Result<null_desktop::backend::Outcome, String> {
+    backend.client.submit(action).unwrap().await.unwrap()
+}
+
+async fn reveal(
+    backend: &Backend,
+    passphrase: &str,
+) -> Result<null_desktop::backend::Outcome, String> {
+    let passphrase = Zeroizing::new(passphrase.into());
+    submit(backend, Action::RevealSeed { passphrase }).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_recovery_phrase_shows_again_and_older_wallets_can_store_theirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let startup = setup(&dir.path().join("data"));
+    let mut backend = Backend::spawn(startup.backend);
+    ready(&mut backend).await;
+    assert!(reveal(&backend, "setup-test").await.is_err(), "locked");
+    let phrase = open(&backend, OpenMode::Create).await.phrase.unwrap();
+    assert!(reveal(&backend, "wrong").await.is_err());
+    let shown = reveal(&backend, "setup-test").await.unwrap();
+    assert_eq!(shown.phrase.unwrap().as_str(), phrase.as_str());
+    assert_eq!(shown.account, Some(0));
+    let stored = snapshot_until(&mut backend, |s| s.wallet.is_some()).await;
+    assert_eq!(stored.wallet.unwrap()["seed_phrase_stored"], true);
+    for method in ["getseedphrase", "setseedphrase"] {
+        let refused = gui(&backend, method, json!(["setup-test"]))
+            .await
+            .unwrap_err();
+        assert!(refused.contains("Backup page"), "{method}: {refused}");
+    }
+    // External clients holding the token still need the passphrase.
+    let words = backend
+        .client
+        .call("getseedphrase", &Params::new(json!(["setup-test"])))
+        .await
+        .unwrap();
+    assert_eq!(words["seed_phrase"], phrase.as_str());
+    backend.shutdown().await.unwrap();
+
+    // A wallet file from before phrases were kept.
+    let startup = setup(&dir.path().join("older"));
+    let genesis = genesis(&startup.backend.node.network.params()).hash();
+    let seed = null_wallet::seed::SeedPhrase::parse(&phrase).unwrap();
+    drop(
+        Wallet::create(
+            &startup.paths.wallet,
+            &seed.spending_key(0).unwrap(),
+            genesis,
+            b"setup-test",
+            &mut rand::rngs::OsRng,
+        )
+        .unwrap(),
+    );
+    let mut backend = Backend::spawn(startup.backend);
+    ready(&mut backend).await;
+    open(&backend, OpenMode::Existing).await;
+    assert!(
+        reveal(&backend, "setup-test").await.is_err(),
+        "nothing kept"
+    );
+    let other = null_wallet::seed::SeedPhrase::generate(&mut rand::rngs::OsRng).unwrap();
+    let attach = |words: Zeroizing<String>| Action::AttachSeed { phrase: words };
+    assert!(submit(&backend, attach(other.words())).await.is_err());
+    submit(&backend, attach(phrase.clone())).await.unwrap();
+    let shown = reveal(&backend, "setup-test").await.unwrap();
+    assert_eq!(shown.phrase.unwrap().as_str(), phrase.as_str());
+    backend.shutdown().await.unwrap();
+
+    // A CLI wallet on another account: the GUI cannot attach it as account
+    // 0 and says how, and a revealed phrase reports its account.
+    let startup = setup(&dir.path().join("account"));
+    drop(
+        Wallet::create(
+            &startup.paths.wallet,
+            &seed.spending_key(7).unwrap(),
+            genesis,
+            b"setup-test",
+            &mut rand::rngs::OsRng,
+        )
+        .unwrap(),
+    );
+    let mut backend = Backend::spawn(startup.backend);
+    ready(&mut backend).await;
+    open(&backend, OpenMode::Existing).await;
+    let refused = submit(&backend, attach(phrase.clone()))
+        .await
+        .err()
+        .unwrap();
+    assert!(refused.contains("attach-seed --account"), "{refused}");
+    backend
+        .client
+        .call("setseedphrase", &Params::new(json!([phrase.as_str(), 7])))
+        .await
+        .unwrap();
+    let shown = reveal(&backend, "setup-test").await.unwrap();
+    assert_eq!(shown.phrase.unwrap().as_str(), phrase.as_str());
+    assert_eq!(shown.account, Some(7));
     backend.shutdown().await.unwrap();
 }
 

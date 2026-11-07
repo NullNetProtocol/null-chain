@@ -121,7 +121,8 @@ impl Backup {
     }
 }
 
-fn word_grid(ui: &mut Ui, phrase: &str) {
+/// Draws the phrase's words, numbered, in the recovery word grid.
+pub(super) fn word_grid(ui: &mut Ui, phrase: &str) {
     let words: Vec<&str> = phrase.split_whitespace().collect();
     widgets::word_grid(ui, words.len(), |ui, index| {
         widgets::word_display(ui, index, words.get(index).copied().unwrap_or_default());

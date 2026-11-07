@@ -38,17 +38,19 @@ enum Page {
     Send,
     Activity,
     Node,
+    Backup,
     Debug,
 }
 
 impl Page {
     /// Sidebar order, titles, and icons.
-    const ALL: [(Self, &'static str, Icon); 6] = [
+    const ALL: [(Self, &'static str, Icon); 7] = [
         (Self::Overview, "Overview", Icon::Overview),
         (Self::Receive, "Receive", Icon::Receive),
         (Self::Send, "Send", Icon::Send),
         (Self::Activity, "Activity", Icon::Activity),
         (Self::Node, "Node", Icon::Node),
+        (Self::Backup, "Backup", Icon::Backup),
         (Self::Debug, "Debug", Icon::Debug),
     ];
 }
@@ -62,6 +64,7 @@ struct Screens {
     mining: screens::mining::Form,
     activity: screens::activity::Form,
     debug: screens::debug::Form,
+    recovery: screens::recovery::Form,
 }
 
 /// A backend request in flight and where its result goes; `None` shows
@@ -114,6 +117,9 @@ impl App {
                 self.submit(call.into(), route);
             }
             Effect::Notify(message) => self.message = message,
+            Effect::Reveal(passphrase) => {
+                self.submit(Action::RevealSeed { passphrase }, Some(Reply::Seed));
+            }
         }
     }
 
@@ -150,6 +156,18 @@ impl App {
             self.message = String::new();
             return;
         }
+        if route == Some(Reply::Seed) {
+            self.message = match result {
+                Ok(outcome) => {
+                    self.screens
+                        .recovery
+                        .revealed(outcome.phrase, outcome.account);
+                    outcome.message
+                }
+                Err(error) => error,
+            };
+            return;
+        }
         if route == Some(Reply::Quote) {
             self.screens.send.quoted(
                 result
@@ -169,7 +187,10 @@ impl App {
         self.message = match (route, result) {
             (_, Err(error)) => error,
             (Some(Reply::Notice(notice)), Ok(_)) => notice.into(),
-            (Some(Reply::Quote | Reply::ConsolidationQuote | Reply::Debug), Ok(_)) => String::new(),
+            (
+                Some(Reply::Quote | Reply::ConsolidationQuote | Reply::Debug | Reply::Seed),
+                Ok(_),
+            ) => String::new(),
             (None, Ok(outcome)) => {
                 if let Some(phrase) = outcome.phrase {
                     let words = phrase.split_whitespace().count();
@@ -186,6 +207,7 @@ impl App {
     fn lock(&mut self, notice: Option<&'static str>) {
         self.screens.send.discard_review();
         self.screens.debug.clear();
+        self.screens.recovery.clear();
         self.submit(Action::Lock, notice.map(Reply::Notice));
     }
 
@@ -217,6 +239,10 @@ impl App {
                 brand(ui);
                 for (page, title, icon) in Page::ALL {
                     if widgets::nav_item(ui, icon, title, self.page == page).clicked() {
+                        // A shown phrase never stays behind on a page left open.
+                        if page != self.page {
+                            self.screens.recovery.clear();
+                        }
                         self.page = page;
                     }
                     ui.add_space(theme::SPACE_XS);
@@ -325,6 +351,7 @@ fn route(
         Page::Activity => return screens.activity.show(ui, state),
         Page::Receive => return screens.receive.show(ui, state),
         Page::Send => return screens.send.show(ui, state),
+        Page::Backup => return screens.recovery.show(ui, state),
         Page::Node | Page::Debug => {}
     }
     None

@@ -18,7 +18,7 @@ use null_protocol::maturity::earlier_origin;
 use null_protocol::memo::Memo;
 use null_protocol::transaction::Transaction;
 use null_wallet::keys::WalletKeys;
-use null_wallet::seed::SeedPhrase;
+use null_wallet::seed::{AccountPhrase, SeedPhrase};
 use null_wallet::spend::{build_payment, Payment};
 use null_wallet::wallet::Wallet;
 
@@ -216,6 +216,31 @@ pub enum Command {
         #[arg(long, default_value = "main")]
         network: Network,
     },
+    /// Print the seed phrase a wallet file keeps, after asking for its
+    /// passphrase. Wallets created before phrases were kept, or from a
+    /// spending key, have none until one is attached with `attach-seed`.
+    ShowSeed {
+        /// Wallet file (close the desktop or wallet daemon using it first).
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Network the wallet is for.
+        #[arg(long, default_value = "main")]
+        network: Network,
+    },
+    /// Store a wallet's seed phrase in its file so `show-seed` can print
+    /// it later. The phrase, from `NULL_SEED_PHRASE` or prompted, must
+    /// derive the wallet's own spending key.
+    AttachSeed {
+        /// Wallet file (close the desktop or wallet daemon using it first).
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Account of the seed phrase the wallet was created from.
+        #[arg(long, default_value_t = 0)]
+        account: u32,
+        /// Network the wallet is for.
+        #[arg(long, default_value = "main")]
+        network: Network,
+    },
     /// Build the genesis coinbase paying the premine to an address and
     /// write its bytes to a file, for committing as the network's
     /// `genesis_coinbase`. Every run yields a new transaction and so a
@@ -381,6 +406,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             None => create_wallet(&wallet, sk.as_deref(), phrase, account, network),
         },
         Command::ExportViewingKey { wallet, network } => export_viewing_key(&wallet, network),
+        Command::ShowSeed { wallet, network } => show_seed(&wallet, network),
+        Command::AttachSeed {
+            wallet,
+            account,
+            network,
+        } => attach_seed(&wallet, account, network),
         Command::GenesisCoinbase {
             network,
             address,
@@ -688,19 +719,22 @@ fn create_wallet(
     account: u32,
     network: Network,
 ) -> Result<()> {
-    let (sk, fresh) = match (sk, restore) {
-        (Some(hex), _) => (sk_from_hex(hex)?, None),
-        (None, true) => (seed_phrase()?.spending_key(account)?, None),
-        (None, false) => {
-            let phrase = SeedPhrase::generate(&mut rand::rngs::OsRng)?;
-            (phrase.spending_key(account)?, Some(phrase))
-        }
-    };
+    let phrase = match (sk, restore) {
+        (Some(_), _) => None,
+        (None, true) => Some(seed_phrase()?),
+        (None, false) => Some(SeedPhrase::generate(&mut rand::rngs::OsRng)?),
+    }
+    .map(|phrase| AccountPhrase { phrase, account });
     let passphrase = passphrase(true)?;
     let genesis = genesis(&network.params()).hash();
-    let created = Wallet::create(path, &sk, genesis, &passphrase, &mut rand::rngs::OsRng)?;
-    if let Some(phrase) = fresh {
-        println!("seed_phrase: {}", *phrase.words());
+    let rng = &mut rand::rngs::OsRng;
+    let created = match (&phrase, sk) {
+        (Some(phrase), _) => Wallet::create_from_phrase(path, phrase, genesis, &passphrase, rng)?,
+        (None, Some(hex)) => Wallet::create(path, &sk_from_hex(hex)?, genesis, &passphrase, rng)?,
+        (None, None) => return Err(Error::Argument("expected a phrase or a key".into())),
+    };
+    if let Some(phrase) = phrase.filter(|_| !restore) {
+        println!("seed_phrase: {}", *phrase.phrase.words());
         println!("write the seed phrase down; it restores this wallet on any machine");
     }
     println!(
@@ -758,6 +792,32 @@ fn export_viewing_key(wallet: &WalletArgs, network: Network) -> Result<()> {
             network.address_prefix()
         )
     );
+    Ok(())
+}
+
+/// Prints the seed phrase a wallet file keeps, asking for its passphrase.
+fn show_seed(path: &Path, network: Network) -> Result<()> {
+    let genesis = genesis(&network.params()).hash();
+    let passphrase = passphrase(false)?;
+    let wallet = Wallet::open(path, genesis, &passphrase)?;
+    let stored = wallet.reveal_seed_phrase(&passphrase)?.ok_or_else(|| {
+        Error::Argument("this wallet keeps no seed phrase; store it with attach-seed".into())
+    })?;
+    println!("seed_phrase: {}", *stored.phrase.words());
+    println!("account: {}", stored.account);
+    Ok(())
+}
+
+/// Stores the seed phrase of an existing wallet file in it.
+fn attach_seed(path: &Path, account: u32, network: Network) -> Result<()> {
+    let genesis = genesis(&network.params()).hash();
+    let wallet = open_wallet_file(path, genesis)?;
+    let phrase = AccountPhrase {
+        phrase: seed_phrase()?,
+        account,
+    };
+    wallet.attach_seed_phrase(&phrase)?;
+    println!("seed phrase stored; show it with nulld show-seed");
     Ok(())
 }
 

@@ -15,11 +15,13 @@ pub mod mining;
 pub mod node;
 pub mod overview;
 pub mod receive;
+pub mod recovery;
 pub mod send;
 pub mod setup;
 
 use null_desktop::backend::Action;
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 /// What a screen asks the app shell to do after drawing.
 pub enum Effect {
@@ -29,6 +31,8 @@ pub enum Effect {
     Call(Call),
     /// Show a message in the status bar; an empty message clears it.
     Notify(String),
+    /// Show the stored recovery phrase once this passphrase is checked.
+    Reveal(Zeroizing<String>),
 }
 
 /// A node or wallet method invocation requested by a screen.
@@ -63,6 +67,8 @@ pub enum Reply {
     ConsolidationQuote,
     /// Hand a command's result or error to the debug console.
     Debug,
+    /// Hand a revealed recovery phrase to the backup page.
+    Seed,
 }
 
 impl From<Call> for Action {

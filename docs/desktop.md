@@ -194,6 +194,22 @@ privacy wallet should not leave on disk unless asked; switch it on when
 reporting a problem. A log over 10 MiB is moved to `debug.log.1`
 (replacing the older one) when logging starts.
 
+## Recovery phrase
+
+Open **Backup** in the sidebar to see the 24 words again. The passphrase is
+asked again before the words are shown; **Hide phrase**, leaving the page,
+or locking erases them from the screen. Wallets created before the phrase
+was kept in the wallet file have nothing to show yet: the page asks for the
+written-down words instead, checks that they derive this wallet's key, and
+stores them. The page shows the seed account with the words; a wallet made
+with `nulld create --account N` warns that importing the words here
+restores account 0, a different wallet, and gives the `nulld` command
+instead. Storing a phrase from the page covers account 0 only; other
+accounts use `nulld attach-seed --account N`. A reveal still in flight
+when you leave the page or lock is discarded. The debug console refuses
+`getseedphrase` and `setseedphrase` (by their first word, even when the
+rest does not parse) so a passphrase or phrase never sits in its history.
+
 ## Debug console
 
 Open **Debug** in the sidebar to run RPC commands against the embedded
@@ -339,8 +355,15 @@ This is a functional development scaffold, not a finished wallet release.
 Remaining work includes full transaction detail views, file pickers,
 pagination, push-driven snapshots,
 packaging/signing, accessibility review, and native smoke tests on all three
-desktop platforms. Status snapshots currently refresh once a second, and
-the UI checks for updates every 200 ms.
+desktop platforms. Status snapshots refresh once a second on their own task,
+and GUI and RPC calls run concurrently beside it, so a snapshot waiting on a
+node busy importing blocks does not delay unlocking or console commands.
+After unlocking or any other action, the wallet's own fields (info, balance,
+addresses, operations, and received notes when none are shown) are read
+from the wallet file and published before the action answers, so the
+wallet appears at once instead of after the next node-backed snapshot.
+Locking cancels the snapshot and waits for running calls before the wallet
+closes. The UI checks for updates every 200 ms.
 
 The desktop intentionally puts P2P handling and unlocked spending keys in
 the same process. The standalone daemons remain available for deployments

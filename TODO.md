@@ -204,6 +204,11 @@ Tick an item only when it has tests and passes clippy.
 - [x] Release version (`vX.Y.Z`) always visible at the bottom of the desktop sidebar; the release workflow fails on a tag that does not match the workspace version; release 0.1.7 (2026-10-24)
 - [x] Debug page: in-memory RPC console for node and wallet methods with method suggestions, command history, JSON or plain arguments, `node.` prefix, truncated large results, cleared on Clear or lock; `stop` from the console shuts down the backend; release 0.1.9 (2026-10-26)
 - [x] Log file switch on the Node page (`log_file` in `null.conf`, off by default for privacy), `<network>/debug.log` rotated to `debug.log.1` above 10 MiB at start (2026-10-22)
+- [x] Recovery phrase kept sealed in the wallet file (`seed_phrase`, tag 5) and shown again after the passphrase: desktop Backup page, `getseedphrase`, `nulld show-seed`; older files attach theirs once, checked against the spending key (`setseedphrase`, `nulld attach-seed`, Backup page); the debug console refuses both methods (2026-11-05)
+- [x] Desktop snapshots built on their own task and calls run concurrently (at most 16), so unlock, lock and console commands no longer queue behind a snapshot stuck on a syncing node; lock cancels the snapshot and drains calls first (2026-11-05)
+- [x] Unlocking shows the wallet at once while syncing (its own fields are published before the unlock answers); Enter submits the passphrase on the unlock, create and Backup pages (2026-11-07)
+- [ ] Node answers read-only requests (status, block, hash) without waiting behind block imports in its event loop; wallet scanning off the async worker threads
+- [ ] Measure commit cost on Windows (redb fsync per block for chain and wallet) and consider batching wallet commits during catch-up
 - [ ] Installers and signing: macOS .app bundle and notarization, Windows installer with the exe icon and Authenticode signing, Linux AppImage
 - [x] Activity as one list with local dates and times, All/Sent/Received/Mined filters, change hidden by default, search, and pages of 20; mined rewards dated by their paying block; release 0.1.5 (2026-10-19)
 - [ ] Transaction detail view (`gettransaction`), file pickers, viewing-key export and rescan from the GUI

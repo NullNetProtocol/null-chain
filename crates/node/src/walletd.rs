@@ -48,6 +48,10 @@ use crate::rpc::{transaction_status, Control, Endpoint, Source, Token};
 use crate::shutdown::Shutdown;
 use crate::{logging, now, Error, Result};
 
+mod recovery;
+
+pub use recovery::SECRET_METHODS;
+
 /// Where the daemon listens unless told otherwise.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:18447";
 /// File the generated token is written to, next to the wallet file.
@@ -82,6 +86,8 @@ pub const METHODS: &[&str] = &[
     "rescan",
     "getpaymentdisclosure",
     "answerchallenge",
+    "getseedphrase",
+    "setseedphrase",
     "help",
 ];
 
@@ -736,6 +742,19 @@ impl WalletDaemon {
         Self::submit_recorded(client, &op).await
     }
 
+    /// Runs `work` on the wallet on a blocking thread, for key derivations
+    /// and other work too slow for the async threads.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Wallet) -> null_wallet::Result<T> + Send + 'static,
+    ) -> core::result::Result<T, RpcError> {
+        let daemon = self.clone();
+        tokio::task::spawn_blocking(move || work(&daemon.0.wallet))
+            .await
+            .map_err(|_| RpcError::from(Error::Stopped))?
+            .map_err(RpcError::from)
+    }
+
     fn scanned_height(&self) -> Result<Option<u32>> {
         Ok(self.0.wallet.scanned_height()?)
     }
@@ -896,6 +915,7 @@ impl Dispatch for WalletDaemon {
                 let index: Option<u32> = params.opt(1, "index")?;
                 self.payment_disclosures(txid, index).await
             }
+            "getseedphrase" | "setseedphrase" => self.seed_methods(method, params).await,
             "answerchallenge" => {
                 let hex: String = params.get(0, "challenge")?;
                 let challenge = Challenge::from_slice(&null_crypto::encoding::from_hex(&hex)?)?;
@@ -937,6 +957,7 @@ impl WalletDaemon {
                     "unspent": notes.iter().filter(|n| n.spent_at.is_none()).count(),
                     "balance": wallet.balance()?.to_string(),
                     "pending_operations": pending,
+                    "seed_phrase_stored": wallet.has_seed_phrase()?,
                     "last_error": self.0.last_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
                 }))
             }
@@ -1385,6 +1406,73 @@ mod tests {
 
     fn offline_daemon(wallet: Wallet) -> WalletDaemon {
         daemon(wallet, Source::Embedded(tokio::sync::mpsc::channel(1).0))
+    }
+
+    /// The BIP 39 all-zero phrase, whose account 0 key is the one
+    /// [`wallet_file`] holds.
+    const ZERO_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+        abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+        abandon abandon abandon abandon abandon art";
+
+    async fn rpc(
+        daemon: &WalletDaemon,
+        method: &str,
+        params: Value,
+    ) -> core::result::Result<Value, RpcError> {
+        daemon.call(method, &Params::new(params)).await
+    }
+
+    fn code(result: core::result::Result<Value, RpcError>) -> i64 {
+        result.err().map_or(0, |error| error.code)
+    }
+
+    #[tokio::test]
+    async fn an_older_wallet_shows_its_seed_phrase_only_after_attaching_it_and_with_the_passphrase()
+    {
+        let (_dir, wallet) = wallet_file();
+        let daemon = offline_daemon(wallet);
+        let info = rpc(&daemon, "getwalletinfo", json!([])).await.unwrap();
+        assert_eq!(info["seed_phrase_stored"], false);
+        assert_eq!(
+            code(rpc(&daemon, "getseedphrase", json!(["pw"])).await),
+            REJECTED
+        );
+        assert_eq!(
+            code(rpc(&daemon, "setseedphrase", json!([ZERO_PHRASE, 1])).await),
+            REJECTED,
+            "another account derives another key"
+        );
+        assert_eq!(
+            code(rpc(&daemon, "setseedphrase", json!(["not a phrase"])).await),
+            crate::jsonrpc::INVALID_PARAMS
+        );
+        let stored = rpc(
+            &daemon,
+            "setseedphrase",
+            json!({ "seed_phrase": ZERO_PHRASE }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored["stored"], true);
+        let info = rpc(&daemon, "getwalletinfo", json!([])).await.unwrap();
+        assert_eq!(info["seed_phrase_stored"], true);
+        assert_eq!(
+            code(rpc(&daemon, "getseedphrase", json!(["guess"])).await),
+            REJECTED
+        );
+        let shown = rpc(&daemon, "getseedphrase", json!({ "passphrase": "pw" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            shown["seed_phrase"]
+                .as_str()
+                .unwrap()
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            ZERO_PHRASE.split_whitespace().collect::<Vec<_>>()
+        );
+        assert_eq!(shown["account"], 0);
+        assert!(SECRET_METHODS.iter().all(|m| METHODS.contains(m)));
     }
 
     fn payment(wallet: &Wallet) -> Operation {

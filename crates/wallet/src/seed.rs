@@ -77,6 +77,67 @@ impl SeedPhrase {
             .spending_key()
             .clone())
     }
+
+    /// The phrase's entropy: 16 to 32 bytes, the canonical stored form.
+    pub fn entropy(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(self.0.to_entropy())
+    }
+
+    /// The phrase carrying `entropy`.
+    ///
+    /// # Errors
+    /// Returns [`Error::SeedPhrase`] unless the length is a BIP 39 one.
+    pub fn from_entropy(entropy: &[u8]) -> Result<Self> {
+        Mnemonic::from_entropy_in(LANGUAGE, entropy)
+            .map(Self)
+            .map_err(|e| Error::SeedPhrase(e.to_string()))
+    }
+}
+
+/// Bytes of the account index ahead of the entropy in
+/// [`AccountPhrase::to_bytes`].
+const ACCOUNT_LEN: usize = 4;
+
+/// A seed phrase together with the account a wallet's spending key comes
+/// from: what a wallet file stores so its phrase can be shown again.
+#[derive(Clone, Debug)]
+pub struct AccountPhrase {
+    /// The phrase.
+    pub phrase: SeedPhrase,
+    /// The account the wallet uses; restoring needs it too.
+    pub account: u32,
+}
+
+impl AccountPhrase {
+    /// The spending key of this account.
+    ///
+    /// # Errors
+    /// As [`SeedPhrase::spending_key`].
+    pub fn spending_key(&self) -> Result<SpendingKey> {
+        self.phrase.spending_key(self.account)
+    }
+
+    /// `account` (little endian, 4 bytes) followed by the entropy.
+    pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
+        let mut out = Zeroizing::new(self.account.to_le_bytes().to_vec());
+        out.extend_from_slice(&self.phrase.entropy());
+        out
+    }
+
+    /// Parses [`Self::to_bytes`].
+    ///
+    /// # Errors
+    /// Returns [`Error::SeedPhrase`] for a short record or entropy of a
+    /// length BIP 39 does not define.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let (account, entropy) = bytes
+            .split_first_chunk::<ACCOUNT_LEN>()
+            .ok_or_else(|| Error::SeedPhrase("record too short".into()))?;
+        Ok(Self {
+            phrase: SeedPhrase::from_entropy(entropy)?,
+            account: u32::from_le_bytes(*account),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +180,41 @@ mod tests {
         ));
         assert!(SeedPhrase::parse("").is_err());
         assert!(SeedPhrase::parse("not words at all").is_err());
+    }
+
+    #[test]
+    fn entropy_round_trips_and_only_bip39_lengths_are_accepted() {
+        let phrase = SeedPhrase::parse(ZERO_PHRASE).unwrap();
+        assert_eq!(*phrase.entropy(), vec![0u8; 32]);
+        let back = SeedPhrase::from_entropy(&phrase.entropy()).unwrap();
+        assert_eq!(*back.words(), ZERO_PHRASE);
+        for length in [16, 20, 24, 28] {
+            assert!(SeedPhrase::from_entropy(&vec![7u8; length]).is_ok());
+        }
+        for length in [0, 15, 17, 33] {
+            assert!(SeedPhrase::from_entropy(&vec![7u8; length]).is_err());
+        }
+    }
+
+    #[test]
+    fn account_phrases_round_trip_and_reject_garbage() {
+        let stored = AccountPhrase {
+            phrase: SeedPhrase::generate(&mut ChaCha20Rng::seed_from_u64(2)).unwrap(),
+            account: 7,
+        };
+        let bytes = stored.to_bytes();
+        assert_eq!(bytes.len(), ACCOUNT_LEN + 32);
+        let back = AccountPhrase::from_bytes(&bytes).unwrap();
+        assert_eq!(back.account, 7);
+        assert_eq!(*back.phrase.words(), *stored.phrase.words());
+        assert_eq!(
+            back.spending_key().unwrap().to_bytes(),
+            stored.phrase.spending_key(7).unwrap().to_bytes()
+        );
+        assert!(AccountPhrase::from_bytes(&[]).is_err());
+        assert!(AccountPhrase::from_bytes(&bytes[..ACCOUNT_LEN]).is_err());
+        assert!(AccountPhrase::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+        assert!(!format!("{back:?}").contains(&*stored.phrase.words()));
     }
 
     #[test]

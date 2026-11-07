@@ -252,12 +252,23 @@ the same transport, envelope, error codes and conventions as the node's.
 
 | Method | Parameters | Result |
 |---|---|---|
-| `getwalletinfo` | | `network`, `watch_only`, `scanned_height`, `node_height`, `synced`, `notes`, `unspent`, `balance`, `pending_operations`, `last_error` (of the sync loop, or null) |
+| `getwalletinfo` | | `network`, `watch_only`, `scanned_height`, `node_height`, `synced`, `notes`, `unspent`, `balance`, `pending_operations`, `seed_phrase_stored`, `last_error` (of the sync loop, or null) |
 | `getnewaddress` | `label` = "" | `{index, address, label}`: the next diversified address, recorded under the label. Index 0 is the default address, used for change |
 | `listaddresses` | | `[{index, address, label}]`, the default address first |
 | `getaddressinfo` | `address` | `{is_mine, index, label}` |
 | `validateaddress` | `address` | `{valid, network}` |
 | `exportviewingkey` | | `{viewing_key, watch_only}`: the full viewing key as `nullview1...` / `tnullview1...`, for a watch-only wallet |
+| `getseedphrase` | `passphrase` | `{seed_phrase, account}`: the recovery phrase the wallet file keeps. Error -2 for a wrong passphrase or a file that keeps none |
+| `setseedphrase` | `seed_phrase`, `account` = 0 | `{stored: true}`: stores the phrase in a file that keeps none, after checking it derives the wallet's spending key. Error -2 for another wallet's phrase or account, -32602 for an invalid phrase |
+
+**Recovery phrase.** Wallets created from a phrase (`nulld create`,
+`nulld create --phrase`, the desktop) keep it sealed under the file key so
+it can be shown again; files created before this, or from `--sk`, keep
+none until `setseedphrase` or `nulld attach-seed` stores it. `getseedphrase`
+asks for the wallet passphrase although the daemon holds the unlocked
+wallet: the token lets a client spend, but the phrase is every account of
+the seed and outlives the token. Offline, `nulld show-seed --wallet <file>`
+prints it after the passphrase prompt.
 
 A watch-only wallet is created from an exported key with
 `nulld create --viewing-key`. It finds notes, their memos and their
