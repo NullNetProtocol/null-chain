@@ -206,7 +206,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Log file switch on the Node page (`log_file` in `null.conf`, off by default for privacy), `<network>/debug.log` rotated to `debug.log.1` above 10 MiB at start (2026-10-22)
 - [x] Recovery phrase kept sealed in the wallet file (`seed_phrase`, tag 5) and shown again after the passphrase: desktop Backup page, `getseedphrase`, `nulld show-seed`; older files attach theirs once, checked against the spending key (`setseedphrase`, `nulld attach-seed`, Backup page); the debug console refuses both methods (2026-11-05)
 - [x] Desktop snapshots built on their own task and calls run concurrently (at most 16), so unlock, lock and console commands no longer queue behind a snapshot stuck on a syncing node; lock cancels the snapshot and drains calls first (2026-11-05)
-- [x] Unlocking shows the wallet at once while syncing (its own fields are published before the unlock answers); Enter submits the passphrase on the unlock, create and Backup pages (2026-11-07)
+- [x] Unlocking shows the wallet at once while syncing (its own fields are published before the unlock answers); Enter submits the passphrase on the unlock, create and Backup pages; release 0.1.10 (2026-11-07)
 - [ ] Node answers read-only requests (status, block, hash) without waiting behind block imports in its event loop; wallet scanning off the async worker threads
 - [ ] Measure commit cost on Windows (redb fsync per block for chain and wallet) and consider batching wallet commits during catch-up
 - [ ] Installers and signing: macOS .app bundle and notarization, Windows installer with the exe icon and Authenticode signing, Linux AppImage
