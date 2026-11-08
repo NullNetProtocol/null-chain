@@ -5,12 +5,14 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use null_node::config::{Config, OUTBOUND_TARGET};
-use null_node::node::{spawn, Event, Handle, PeerSummary, Request, Response};
+use null_node::node::{spawn, Event, Handle, PeerSummary, Reachability, Request, Response};
+use null_node::portmap::{MappingState, Protocol};
 use null_p2p::addrbook::Snapshot;
 use null_p2p::message::{Message, PeerAddr};
 use null_p2p::noise::Role;
 use null_p2p::peer::{version_info, Direction};
 use null_p2p::transport::{establish, ConnectionReader, ConnectionWriter};
+use null_protocol::block::BlockHash;
 use tokio::net::{TcpListener, TcpStream};
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -52,6 +54,20 @@ async fn wait_for(nodes: &[&Handle], mut check: impl AsyncFnMut() -> bool) {
     .unwrap();
 }
 
+async fn genesis_of(node: &Handle) -> BlockHash {
+    match node.request(Request::Block(0)).await.unwrap() {
+        Response::Block(Some(block)) => block.hash(),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+async fn reachability(node: &Handle) -> Reachability {
+    match node.request(Request::Reachability).await.unwrap() {
+        Response::Reachability(reachability) => *reachability,
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
 fn address(addr: SocketAddr) -> PeerAddr {
     let ip = match addr.ip() {
         std::net::IpAddr::V4(ip) => ip.to_ipv6_mapped().octets(),
@@ -71,12 +87,28 @@ struct Client {
 
 impl Client {
     async fn connect(node: &Handle) -> Self {
-        let genesis = match node.request(Request::Block(0)).await.unwrap() {
-            Response::Block(Some(block)) => block.hash(),
-            other => panic!("unexpected {other:?}"),
-        };
+        let genesis = genesis_of(node).await;
         let stream = TcpStream::connect(node.listen_addr.unwrap()).await.unwrap();
         let (writer, reader) = establish(stream, Role::Initiator).await.unwrap();
+        Self::handshake(writer, reader, genesis).await
+    }
+
+    /// Accepts a connection `node` dials to `listener`, as a seed would.
+    async fn accept(listener: &TcpListener, node: &Handle) -> Self {
+        let genesis = genesis_of(node).await;
+        let (stream, _) = tokio::time::timeout(DEADLINE, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let (writer, reader) = establish(stream, Role::Responder).await.unwrap();
+        Self::handshake(writer, reader, genesis).await
+    }
+
+    async fn handshake(
+        writer: ConnectionWriter,
+        reader: ConnectionReader,
+        genesis: BlockHash,
+    ) -> Self {
         let mut client = Self { writer, reader };
         client
             .writer
@@ -484,4 +516,43 @@ async fn a_restarted_node_still_shares_the_listeners_it_verified() {
         "{shared:?}"
     );
     restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_port_mapping_is_announced_at_once_and_inbound_peers_prove_reachability() {
+    let seed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node = spawn(Config {
+        listen: Some(listener()),
+        connect: vec![seed.local_addr().unwrap().to_string()],
+        ..Config::test()
+    })
+    .await
+    .unwrap();
+    let mut from_node = Client::accept(&seed, &node).await;
+    let before = reachability(&node).await;
+    assert_eq!(before.port_mapping, None);
+    assert_eq!(before.last_public_inbound, None);
+
+    // A router answering after the handshake: announced now, not at the
+    // next ten-minute exchange.
+    let public: SocketAddr = "8.8.8.8:19000".parse().unwrap();
+    let mapped = MappingState::Mapped {
+        protocol: Protocol::Upnp,
+        external: public,
+    };
+    node.events()
+        .send(Event::PortMapping(mapped.clone()))
+        .await
+        .unwrap();
+    from_node.wait_for_address(public).await;
+    let after = reachability(&node).await;
+    assert_eq!(after.port_mapping, Some(mapped));
+    assert_eq!(after.announced, Some(public));
+
+    // Someone connecting in is the evidence of reachability.
+    let _inbound = Client::connect(&node).await;
+    let reached = reachability(&node).await;
+    assert!(reached.last_public_inbound.is_some());
+    assert_eq!(reached.inbound, 1);
+    node.shutdown().await;
 }

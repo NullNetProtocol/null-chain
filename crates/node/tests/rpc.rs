@@ -113,6 +113,8 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
         block_notify: None,
         metrics: None,
         max_inbound: 125,
+        listen_fallback: false,
+        port_mapping: false,
     })
     .await
     .unwrap();

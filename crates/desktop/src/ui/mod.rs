@@ -455,6 +455,19 @@ mod tests {
             mining: json!({ "enabled": true, "active": true, "threads": 2, "max_threads": 8,
                 "payout": "tnull1xyz", "found": 3, "in_chain": 2 }),
             log_file: false,
+            incoming: Some(null_desktop::backend::IncomingView {
+                saved: null_desktop::config::Incoming {
+                    enabled: true,
+                    port_mapping: true,
+                },
+                running: null_desktop::config::Incoming {
+                    enabled: true,
+                    port_mapping: false,
+                },
+                rules: null_desktop::config::IncomingRules::default(),
+            }),
+            network: json!({ "listening": "0.0.0.0:19000", "connections_in": 0,
+                "port_mapping": { "state": "off" } }),
             error: None,
         }
     }

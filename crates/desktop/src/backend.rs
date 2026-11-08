@@ -30,7 +30,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use zeroize::Zeroizing;
 
 use crate::block_times::BlockTimes;
-use crate::config::{self, LogFile, Mining};
+use crate::config::{self, Incoming, IncomingRules, LogFile, Mining};
 use refresh::{Built, Inputs, MiningView, Refresh, Services};
 
 /// The seed account the desktop wallet uses.
@@ -54,10 +54,47 @@ pub struct Config {
     pub wallet: PathBuf,
     /// Saved mining settings; mining starts on unlock when enabled.
     pub mining: Mining,
+    /// The saved incoming connection switches. What the node runs with
+    /// is in `node`: a proxy or `--no-incoming` can turn them off.
+    pub incoming: Incoming,
+    /// What the rest of `null.conf` lets the incoming switches do.
+    pub incoming_rules: IncomingRules,
     /// The saved log file switch and where the log goes.
     pub log: LogFile,
-    /// The configuration file the mining and log switches save to.
+    /// The configuration file the mining, incoming and log switches save to.
     pub settings: PathBuf,
+}
+
+/// Incoming connections as the Node page shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IncomingView {
+    /// What `null.conf` says, applied at the next start.
+    pub saved: Incoming,
+    /// What the running node does.
+    pub running: Incoming,
+    /// What the rest of `null.conf` lets the switches do. A proxy keeps
+    /// the node from listening by default and from mapping a port.
+    pub rules: IncomingRules,
+}
+
+impl IncomingView {
+    /// What the node will run with at the next start.
+    #[must_use]
+    pub fn next_start(self) -> Incoming {
+        self.rules.apply(self.saved)
+    }
+
+    /// Whether a restart would change what the node runs with.
+    #[must_use]
+    pub fn needs_restart(self) -> bool {
+        self.next_start() != self.running
+    }
+
+    /// Whether incoming connections are wanted but a proxy keeps them off.
+    #[must_use]
+    pub fn held_off_by_proxy(self) -> bool {
+        self.rules.proxied && self.saved.enabled && !self.next_start().enabled
+    }
 }
 
 /// How to open a wallet.
@@ -87,6 +124,8 @@ pub enum Action {
     SetMining(Mining),
     /// Start or stop writing the log file. The choice is saved.
     SetLogFile(bool),
+    /// Save the incoming connection switches; they apply at the next start.
+    SetIncoming(Incoming),
     /// Show the recovery phrase the wallet file keeps, after checking the
     /// passphrase again; it arrives in [`Outcome::phrase`].
     RevealSeed {
@@ -162,6 +201,11 @@ pub struct Snapshot {
     pub mining: Value,
     /// Whether the log file is being written.
     pub log_file: bool,
+    /// Incoming connection switches, saved and running; `None` until ready.
+    pub incoming: Option<IncomingView>,
+    /// `getnetworkinfo`: connection counts, listener, announced endpoint,
+    /// port mapping, and whether a peer from the internet has connected in.
+    pub network: Value,
     /// Startup or refresh error.
     pub error: Option<String>,
 }
@@ -265,6 +309,7 @@ struct State {
     wallet_path: PathBuf,
     miner: Option<Miner>,
     mining: Mining,
+    incoming: IncomingView,
     log: LogFile,
     settings: PathBuf,
     /// Block facts for dating notes; lent to the running refresh.
@@ -313,6 +358,14 @@ async fn run(
         null_node::logging::warn(&format!("log file not written: {error}"));
     }
     let network = config.node.network;
+    let incoming = IncomingView {
+        saved: config.incoming,
+        running: Incoming {
+            enabled: config.node.listen.is_some(),
+            port_mapping: config.node.port_mapping,
+        },
+        rules: config.incoming_rules,
+    };
     let node = node::spawn(config.node).await?;
     // Acquire the chain database before replacing its token: a second
     // instance must not overwrite a running application's credentials.
@@ -330,6 +383,7 @@ async fn run(
         wallet_path: config.wallet,
         miner: None,
         mining: config.mining.clamped(),
+        incoming,
         log: config.log,
         settings: config.settings,
         block_times: BlockTimes::default(),
@@ -499,6 +553,7 @@ impl State {
             addr: self.addr,
             network: self.network,
             log_file: self.log.enabled,
+            incoming: self.incoming,
             block_times: std::mem::take(&mut self.block_times),
         };
         self.refresh = Some(Refresh::spawn(self.epoch, inputs));
@@ -667,6 +722,14 @@ impl State {
         ))
     }
 
+    /// Saves the incoming connection switches for the next start. Unlike
+    /// the miner and the log, the listener cannot change while running.
+    fn set_incoming(&mut self, saved: Incoming) -> Result<Outcome> {
+        config::save_incoming(&self.settings, saved)?;
+        self.incoming.saved = saved;
+        Ok(Outcome::message(incoming_message(self.incoming)))
+    }
+
     async fn open(&mut self, passphrase: Zeroizing<String>, mode: OpenMode) -> Result<Outcome> {
         if self.wallet.is_some() {
             return Err(Error::Argument("lock the current wallet first".into()));
@@ -730,10 +793,22 @@ impl State {
             Action::Open { passphrase, mode } => self.open(passphrase, mode).await,
             Action::SetMining(mining) => self.set_mining(mining),
             Action::SetLogFile(enabled) => self.set_log_file(enabled),
+            Action::SetIncoming(incoming) => self.set_incoming(incoming),
             Action::RevealSeed { passphrase } => self.reveal_seed(passphrase).await,
             Action::AttachSeed { phrase } => self.attach_seed(&phrase).await,
             Action::Call { .. } => Err(Error::Argument("calls run on their own task".into())),
         }
+    }
+}
+
+/// What saving the incoming switches did, for the status line.
+fn incoming_message(view: IncomingView) -> &'static str {
+    if view.needs_restart() {
+        "Saved; restart the app to apply"
+    } else if view.held_off_by_proxy() {
+        "Saved; incoming connections stay off while a proxy is set"
+    } else {
+        "Saved; the node already runs this way"
     }
 }
 
@@ -807,6 +882,36 @@ fn open_wallet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_incoming_switches_says_whether_a_restart_applies_them() {
+        let on = Incoming {
+            enabled: true,
+            port_mapping: true,
+        };
+        let off = Incoming {
+            enabled: false,
+            port_mapping: true,
+        };
+        let nothing = Incoming {
+            enabled: false,
+            port_mapping: false,
+        };
+        let view = |saved, running, proxied| IncomingView {
+            saved,
+            running,
+            rules: IncomingRules {
+                proxied,
+                ..IncomingRules::default()
+            },
+        };
+        assert!(incoming_message(view(on, on, false)).contains("already"));
+        assert!(incoming_message(view(off, on, false)).contains("restart"));
+        assert!(incoming_message(view(on, nothing, true)).contains("proxy"));
+        assert!(incoming_message(view(off, on, true)).contains("restart"));
+        // Switched off, the saved router switch no longer matters.
+        assert!(incoming_message(view(off, nothing, false)).contains("already"));
+    }
 
     #[test]
     fn restoring_preserves_the_address_and_never_overwrites_a_wallet() {

@@ -49,6 +49,10 @@ pub struct Args {
     /// SOCKS5 proxy for outbound peer connections.
     #[arg(long)]
     pub proxy: Option<SocketAddr>,
+    /// Only dial out for this launch: no listener and no router port
+    /// mapping, whatever null.conf says. Not saved.
+    #[arg(long)]
+    pub no_incoming: bool,
 }
 
 /// Locations shown in the application's storage details.
@@ -114,6 +118,105 @@ pub fn save_mining(path: &Path, mining: Mining) -> Result<()> {
         document.insert("mine", toml_edit::value(mining.enabled));
         let threads = i64::try_from(mining.threads).unwrap_or(i64::MAX);
         document.insert("mining_threads", toml_edit::value(threads));
+    })
+}
+
+/// Whether other nodes may connect to this one, saved in `null.conf` by
+/// the switches on the Node page. Both default to on: a wallet that only
+/// dials out can never be found by other wallets, so without listeners
+/// every wallet depends on the project's seeds alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Incoming {
+    /// Listen for peers.
+    pub enabled: bool,
+    /// Ask the router to forward the listening port.
+    pub port_mapping: bool,
+}
+
+/// The rest of `null.conf` that decides what the incoming switches do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IncomingRules {
+    /// The explicit `listen` address, if any.
+    pub listen: Option<SocketAddr>,
+    /// Whether `advertise` says the port is forwarded by hand.
+    pub advertised: bool,
+    /// Whether peers are dialed through a proxy.
+    pub proxied: bool,
+}
+
+impl IncomingRules {
+    /// What the node runs with when started with `incoming`: a proxy,
+    /// a loopback listener or a hand-forwarded port turn parts of it off.
+    #[must_use]
+    pub fn apply(self, incoming: Incoming) -> Incoming {
+        let listening = Listening::from_settings(incoming, self);
+        Incoming {
+            enabled: listening.listen.is_some(),
+            port_mapping: listening.port_mapping,
+        }
+    }
+}
+
+/// How the embedded node listens, derived from the saved settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Listening {
+    listen: Option<SocketAddr>,
+    /// Whether `listen` is the default, which may move off a taken port.
+    fallback: bool,
+    port_mapping: bool,
+}
+
+impl Listening {
+    /// Off when incoming connections are switched off. With a proxy,
+    /// only an explicit `listen` is used and no port is mapped: a Tor
+    /// user announces nothing, so a public port would only expose them.
+    /// Otherwise the explicit `listen`, or every IPv4 interface on the
+    /// network's port, which another local node may already hold. The
+    /// router is left alone for a loopback listener, which it cannot
+    /// reach, and when `advertise` says the port is forwarded by hand.
+    fn from_settings(incoming: Incoming, rules: IncomingRules) -> Self {
+        let IncomingRules {
+            listen,
+            advertised,
+            proxied,
+        } = rules;
+        let off = Self {
+            listen: None,
+            fallback: false,
+            port_mapping: false,
+        };
+        if !incoming.enabled {
+            return off;
+        }
+        if proxied {
+            return Self { listen, ..off };
+        }
+        let bound = listen.unwrap_or(DEFAULT_LISTEN);
+        Self {
+            listen: Some(bound),
+            fallback: listen.is_none(),
+            port_mapping: incoming.port_mapping && !advertised && !bound.ip().is_loopback(),
+        }
+    }
+}
+
+/// Where the desktop listens unless `listen` says otherwise: every IPv4
+/// interface, so a router mapping can reach it, on the seeds' port.
+const DEFAULT_LISTEN: SocketAddr = SocketAddr::new(
+    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+    null_node::config::DEFAULT_P2P_PORT,
+);
+
+/// Saves the incoming connection switches into the configuration at
+/// `path`, keeping every other setting and comment as it is. They apply
+/// at the next start, since the listener is bound when the node starts.
+///
+/// # Errors
+/// Fails if the file cannot be read, parsed, or written.
+pub fn save_incoming(path: &Path, incoming: Incoming) -> Result<()> {
+    edit_settings(path, |document| {
+        document.insert("incoming", toml_edit::value(incoming.enabled));
+        document.insert("port_mapping", toml_edit::value(incoming.port_mapping));
     })
 }
 
@@ -191,6 +294,9 @@ const DEFAULT_LOCK_MINUTES: u64 = 15;
 /// Seconds per minute, for the lock timeout.
 const SECONDS_PER_MINUTE: u64 = 60;
 
+// One field per null.conf key, and the file's switches are booleans:
+// enums would change the file format users edit by hand.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Settings {
@@ -200,6 +306,10 @@ struct Settings {
     listen: Option<SocketAddr>,
     advertise: Option<SocketAddr>,
     proxy: Option<SocketAddr>,
+    /// Accept peers on `listen`, or on the default listener without one.
+    incoming: bool,
+    /// Ask the router to forward the listening port.
+    port_mapping: bool,
     wallet: Option<PathBuf>,
     /// Minutes without input before the GUI locks the wallet; 0 disables.
     lock_after_minutes: u64,
@@ -222,6 +332,8 @@ impl Default for Settings {
             listen: None,
             advertise: None,
             proxy: None,
+            incoming: true,
+            port_mapping: true,
             wallet: None,
             lock_after_minutes: DEFAULT_LOCK_MINUTES,
             mine: false,
@@ -233,6 +345,14 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// The saved incoming connection switches.
+    fn incoming(&self) -> Incoming {
+        Incoming {
+            enabled: self.incoming,
+            port_mapping: self.port_mapping,
+        }
+    }
+
     /// The saved mining settings, clamped to this machine.
     fn mining(&self) -> Mining {
         Mining {
@@ -324,11 +444,26 @@ impl Startup {
             .as_ref()
             .or_else(|| settings.wallets.get(&network.to_string()))
             .map_or_else(|| paths::wallet_file(&network_dir), |p| network_dir.join(p));
+        let incoming = settings.incoming();
+        let launch = Incoming {
+            enabled: incoming.enabled && !args.no_incoming,
+            ..incoming
+        };
+        let rules = IncomingRules {
+            listen: settings.listen,
+            advertised: settings.advertise.is_some(),
+            proxied: settings.proxy.is_some(),
+        };
+        let listening = Listening::from_settings(launch, rules);
         let node = NodeConfig {
             network,
             datadir: Some(paths::chain_dir(&network_dir)),
-            listen: settings.listen,
-            advertise: settings.advertise,
+            listen: listening.listen,
+            listen_fallback: listening.fallback,
+            port_mapping: listening.port_mapping,
+            // A node that does not listen has nothing to advertise, and
+            // validation would refuse the saved address.
+            advertise: settings.advertise.filter(|_| listening.listen.is_some()),
             // Saved peers first, then the network's seeds, as nulld does.
             // Seeds come from the release, never from null.conf.
             connect: settings
@@ -370,6 +505,8 @@ impl Startup {
                 token_file: network_dir.join("desktop-rpc.token"),
                 wallet: wallet.clone(),
                 mining,
+                incoming,
+                incoming_rules: rules,
                 log: log.clone(),
                 settings: config.clone(),
             },
@@ -406,8 +543,11 @@ fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
     file.write_all(
         b"# NULL desktop settings (TOML). Restart the app after editing.\n\
         # Never put your recovery phrase or wallet passphrase in this file.\n\
+        # incoming = false: only dial out. port_mapping = false: never ask the\n\
+        # router to forward the port (forward it yourself and set advertise).\n\
         # Optional settings (uncomment to enable):\n\
-        # listen = \"127.0.0.1:18445\"\n\
+        # listen = \"0.0.0.0:19000\" # Where to accept peers; this is the default.\n\
+        # advertise = \"203.0.113.7:19000\" # Your forwarded public IP:port.\n\
         # proxy = \"127.0.0.1:9050\"\n\
         # wallet = \"wallet.redb\" # Relative to the selected network directory.\n\n",
     )?;
@@ -513,7 +653,6 @@ mod tests {
         for text in [
             "network = 'invalid'",
             "rpc = '0.0.0.0:18448'",
-            "network = 'test'\nadvertise = '127.0.0.1:19000'",
             "network = 'test'\nlisten = '0.0.0.0:19000'\nadvertise = '127.0.0.1:19000'\nproxy = '127.0.0.1:9050'",
             "unknown = true",
             "broken = [",
@@ -708,6 +847,152 @@ mod tests {
         save_log_file(&path, false).unwrap();
         assert!(!read_settings(&path).unwrap().0.log_file);
         assert!(save_log_file(&dir.path().join("missing.conf"), true).is_err());
+    }
+
+    #[test]
+    fn incoming_connections_and_port_mapping_are_on_by_default_and_saved_in_place() {
+        let defaults = Settings::default().incoming();
+        assert!(defaults.enabled && defaults.port_mapping);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("null.conf");
+        fs::write(&path, "# keep me\nnetwork = \"main\"\n").unwrap();
+        let off = Incoming {
+            enabled: false,
+            port_mapping: true,
+        };
+        save_incoming(&path, off).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("# keep me\nnetwork = \"main\"\n"),
+            "{text}"
+        );
+        assert_eq!(read_settings(&path).unwrap().0.incoming(), off);
+        assert!(save_incoming(&dir.path().join("missing.conf"), off).is_err());
+    }
+
+    fn rules(listen: Option<SocketAddr>, advertised: bool, proxied: bool) -> IncomingRules {
+        IncomingRules {
+            listen,
+            advertised,
+            proxied,
+        }
+    }
+
+    #[test]
+    fn incoming_rules_say_what_a_start_with_the_switches_runs() {
+        let on = Incoming {
+            enabled: true,
+            port_mapping: true,
+        };
+        let off = Incoming {
+            enabled: false,
+            port_mapping: true,
+        };
+        let nothing = Incoming {
+            enabled: false,
+            port_mapping: false,
+        };
+        assert_eq!(IncomingRules::default().apply(on), on);
+        assert_eq!(IncomingRules::default().apply(off), nothing);
+        assert_eq!(rules(None, false, true).apply(on), nothing);
+        let forwarded = rules(None, true, false).apply(on);
+        assert!(forwarded.enabled && !forwarded.port_mapping);
+    }
+
+    #[test]
+    fn a_saved_advertisement_does_not_stop_a_start_without_incoming() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("null.conf");
+        fs::write(&config, "advertise = '8.8.8.8:19000'\n").unwrap();
+        let args = |no_incoming| Args {
+            datadir: Some(dir.path().into()),
+            no_incoming,
+            ..Args::default()
+        };
+        let flagged = Startup::load(&args(true)).unwrap();
+        assert_eq!(flagged.backend.node.listen, None);
+        assert_eq!(flagged.backend.node.advertise, None);
+        let normal = Startup::load(&args(false)).unwrap();
+        assert!(normal.backend.node.advertise.is_some());
+        assert!(!normal.backend.node.port_mapping, "forwarded by hand");
+        fs::write(&config, "advertise = '8.8.8.8:19000'\nincoming = false\n").unwrap();
+        let off = Startup::load(&args(false)).unwrap();
+        assert_eq!(off.backend.node.advertise, None);
+    }
+
+    #[test]
+    fn the_default_listener_takes_every_interface_and_maps_the_port() {
+        let on = Incoming {
+            enabled: true,
+            port_mapping: true,
+        };
+        let listening = Listening::from_settings(on, rules(None, false, false));
+        assert_eq!(listening.listen, Some(DEFAULT_LISTEN));
+        assert!(listening.fallback && listening.port_mapping);
+        let explicit: SocketAddr = "0.0.0.0:20000".parse().unwrap();
+        let chosen = Listening::from_settings(on, rules(Some(explicit), false, false));
+        assert_eq!(chosen.listen, Some(explicit));
+        assert!(!chosen.fallback, "an explicit port must not move");
+        let unmapped = Incoming {
+            port_mapping: false,
+            ..on
+        };
+        assert!(!Listening::from_settings(unmapped, rules(None, false, false)).port_mapping);
+        let forwarded = Listening::from_settings(on, rules(None, true, false));
+        assert!(forwarded.listen.is_some() && !forwarded.port_mapping);
+        let local: SocketAddr = "127.0.0.1:18445".parse().unwrap();
+        let loopback = Listening::from_settings(on, rules(Some(local), false, false));
+        assert_eq!(loopback.listen, Some(local));
+        assert!(!loopback.port_mapping, "a router cannot reach loopback");
+    }
+
+    #[test]
+    fn switching_incoming_off_or_using_a_proxy_stops_listening_by_default() {
+        let explicit: SocketAddr = "0.0.0.0:20000".parse().unwrap();
+        let off = Incoming {
+            enabled: false,
+            port_mapping: true,
+        };
+        assert_eq!(
+            Listening::from_settings(off, rules(Some(explicit), false, false)).listen,
+            None
+        );
+        let on = Incoming {
+            enabled: true,
+            port_mapping: true,
+        };
+        let proxied = Listening::from_settings(on, rules(None, false, true));
+        assert_eq!(proxied.listen, None);
+        assert!(!proxied.port_mapping);
+        let kept = Listening::from_settings(on, rules(Some(explicit), false, true));
+        assert_eq!(kept.listen, Some(explicit));
+        assert!(!kept.port_mapping, "a proxied node never maps a port");
+    }
+
+    #[test]
+    fn a_launch_without_incoming_does_not_listen_or_save_the_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = Args {
+            datadir: Some(dir.path().into()),
+            no_incoming: true,
+            ..Args::default()
+        };
+        let startup = Startup::load(&args).unwrap();
+        assert_eq!(startup.backend.node.listen, None);
+        assert!(!startup.backend.node.port_mapping);
+        assert!(
+            startup.backend.incoming.enabled,
+            "the saved choice stays on"
+        );
+        let (settings, _) = read_settings(&startup.paths.config).unwrap();
+        assert!(settings.incoming);
+        let normal = Startup::load(&Args {
+            datadir: Some(dir.path().into()),
+            ..Args::default()
+        })
+        .unwrap();
+        assert_eq!(normal.backend.node.listen, Some(DEFAULT_LISTEN));
+        assert!(normal.backend.node.port_mapping);
     }
 
     #[test]

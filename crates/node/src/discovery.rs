@@ -35,24 +35,38 @@ pub(crate) fn addr_allowance(direction: Direction) -> usize {
 }
 
 /// Checks the announcement settings: an explicit `advertise` needs a
-/// reachable address, a listener with inbound slots and a direct transport.
+/// reachable address, and both it and port mapping need a listener with
+/// inbound slots and a direct transport. Port mapping also needs a
+/// listener other hosts can reach, so not a loopback one.
 ///
 /// # Errors
 /// [`Error::Argument`] naming the conflicting setting.
 pub(crate) fn validate(config: &Config) -> Result<()> {
     if let Some(addr) = config.advertise {
-        if config.listen.is_none()
-            || config.max_inbound == 0
-            || config.proxy.is_some()
-            || config.i2p.is_some()
-            || !allowed(addr, config.network)
-        {
+        if !direct_listener(config) || !allowed(addr, config.network) {
             return Err(Error::Argument(
                 "advertise requires a reachable IP:port, a listener with inbound slots, and no proxy or I2P".into(),
             ));
         }
     }
+    if config.port_mapping
+        && (!direct_listener(config) || config.listen.is_some_and(|l| l.ip().is_loopback()))
+    {
+        return Err(Error::Argument(
+            "port mapping requires a non-loopback listener with inbound slots, and no proxy or I2P"
+                .into(),
+        ));
+    }
     Ok(())
+}
+
+/// Whether the node listens, takes inbound peers, and dials directly:
+/// what announcing an endpoint of its own requires.
+fn direct_listener(config: &Config) -> bool {
+    config.listen.is_some()
+        && config.max_inbound > 0
+        && config.proxy.is_none()
+        && config.i2p.is_none()
 }
 
 /// Whether a bound listener also accepts IPv4 connections. An IPv6
@@ -308,6 +322,27 @@ mod tests {
             advertise: Some(socket("127.0.0.1:19000")),
             ..Config::test()
         };
+        assert!(validate(&config).is_err());
+        config.listen = Some(socket("0.0.0.0:19000"));
+        assert!(validate(&config).is_ok());
+        config.proxy = Some(socket("127.0.0.1:9050"));
+        assert!(validate(&config).is_err());
+        config.proxy = None;
+        config.i2p = Some(socket("127.0.0.1:7656"));
+        assert!(validate(&config).is_err());
+        config.i2p = None;
+        config.max_inbound = 0;
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn port_mapping_requires_a_reachable_listener_and_direct_transport() {
+        let mut config = Config {
+            port_mapping: true,
+            ..Config::test()
+        };
+        assert!(validate(&config).is_err());
+        config.listen = Some(socket("127.0.0.1:19000"));
         assert!(validate(&config).is_err());
         config.listen = Some(socket("0.0.0.0:19000"));
         assert!(validate(&config).is_ok());

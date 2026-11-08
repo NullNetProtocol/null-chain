@@ -11,6 +11,7 @@
 //! - [`walletd`]: the `null-wallet-rpc` daemon for exchanges.
 //! - [`paths`]: per-user storage locations on Linux, macOS and Windows.
 //! - [`shutdown`]: stop requests from Ctrl-C, service managers and Windows.
+//! - [`portmap`]: router port mapping (PCP, NAT-PMP, `UPnP`) for inbound peers.
 #![cfg_attr(
     test,
     allow(
@@ -36,6 +37,7 @@ pub mod net;
 pub mod node;
 pub mod paths;
 mod peers_file;
+pub mod portmap;
 pub mod rpc;
 pub mod shutdown;
 pub mod walletd;

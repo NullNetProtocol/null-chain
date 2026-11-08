@@ -167,6 +167,14 @@ pub struct Config {
     pub metrics: Option<SocketAddr>,
     /// Inbound connections accepted at once.
     pub max_inbound: usize,
+    /// If `listen`'s port is taken, listen on a port the system picks
+    /// instead of failing to start. For a default listener, such as the
+    /// desktop's, that another node on the same machine may already hold.
+    pub listen_fallback: bool,
+    /// Ask the router to forward the listening port (PCP, NAT-PMP or
+    /// `UPnP`) and announce the mapped endpoint when it is public. Requires
+    /// a listener, inbound slots and a direct transport.
+    pub port_mapping: bool,
 }
 
 impl Config {
@@ -197,6 +205,8 @@ impl Config {
             block_notify: None,
             metrics: None,
             max_inbound: DEFAULT_MAX_INBOUND,
+            listen_fallback: false,
+            port_mapping: false,
         }
     }
 }

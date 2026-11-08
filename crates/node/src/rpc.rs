@@ -307,7 +307,8 @@ pub fn format(response: &Response) -> String {
         | Response::Txids(_)
         | Response::Peers(_)
         | Response::BlockSubmitted(_)
-        | Response::MiningInfo(_) => "err unsupported".into(),
+        | Response::MiningInfo(_)
+        | Response::Reachability(_) => "err unsupported".into(),
     }
 }
 

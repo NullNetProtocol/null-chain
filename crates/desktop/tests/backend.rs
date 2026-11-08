@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use null_chain::genesis::genesis;
 use null_desktop::backend::{Action, Backend, Config, OpenMode, Snapshot};
-use null_desktop::config::{Args, LogFile, Mining, Startup};
+use null_desktop::config::{Args, Incoming, IncomingRules, LogFile, Mining, Startup};
 use null_node::config::{Config as NodeConfig, Network};
 use null_node::jsonrpc::{Dispatch, Params, REJECTED};
 use null_node::rpc::Token;
@@ -78,6 +78,11 @@ async fn console_actions_dispatch_params_errors_and_stop_the_whole_backend() {
             enabled: false,
             threads: 1,
         },
+        incoming: Incoming {
+            enabled: false,
+            port_mapping: false,
+        },
+        incoming_rules: IncomingRules::default(),
         log: LogFile {
             enabled: false,
             path: directory.path().join("debug.log"),
@@ -133,6 +138,11 @@ async fn gui_and_http_share_one_wallet_and_lock_releases_its_database() {
             enabled: false,
             threads: 1,
         },
+        incoming: Incoming {
+            enabled: false,
+            port_mapping: false,
+        },
+        incoming_rules: IncomingRules::default(),
         log: LogFile {
             enabled: false,
             path: directory.path().join("debug.log"),
@@ -318,6 +328,11 @@ async fn desktop_rejects_public_rpc_before_starting_a_node() {
             enabled: false,
             threads: 1,
         },
+        incoming: Incoming {
+            enabled: false,
+            port_mapping: false,
+        },
+        incoming_rules: IncomingRules::default(),
         log: LogFile {
             enabled: false,
             path: directory.path().join("debug.log"),
@@ -332,6 +347,7 @@ fn setup(datadir: &std::path::Path) -> Startup {
     Startup::load(&Args {
         datadir: Some(datadir.into()),
         rpc: Some("127.0.0.1:0".parse().unwrap()),
+        no_incoming: true,
         ..Args::default()
     })
     .unwrap()
@@ -649,6 +665,7 @@ async fn a_mainnet_miner_without_peers_reports_that_it_waits() {
         datadir: Some(dir.path().join("data")),
         rpc: Some("127.0.0.1:0".parse().unwrap()),
         proxy: Some(closed),
+        no_incoming: true,
         ..Args::default()
     })
     .unwrap();

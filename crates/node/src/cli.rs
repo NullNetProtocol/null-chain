@@ -132,6 +132,10 @@ pub enum Command {
         /// Public IP:port to announce, for example a forwarded port behind NAT.
         #[arg(long, requires = "listen", conflicts_with_all = ["proxy", "i2p"])]
         advertise: Option<SocketAddr>,
+        /// Ask the router to forward the listening port (PCP, NAT-PMP or
+        /// `UPnP`) and announce the public endpoint it maps.
+        #[arg(long, requires = "listen", conflicts_with_all = ["proxy", "i2p"])]
+        port_mapping: bool,
         /// Peers to connect to as `host:port`; repeatable.
         #[arg(long)]
         connect: Vec<String>,
@@ -353,6 +357,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             in_memory,
             listen,
             advertise,
+            port_mapping,
             connect,
             seed,
             proxy,
@@ -374,6 +379,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 datadir: node_datadir(datadir, in_memory, network)?,
                 listen,
                 advertise,
+                port_mapping,
                 connect,
                 seed,
                 proxy,
@@ -567,6 +573,7 @@ struct RunOptions {
     datadir: Option<PathBuf>,
     listen: Option<SocketAddr>,
     advertise: Option<SocketAddr>,
+    port_mapping: bool,
     connect: Vec<String>,
     seed: Vec<String>,
     proxy: Option<SocketAddr>,
@@ -586,6 +593,7 @@ async fn run_node(opts: RunOptions) -> Result<()> {
         datadir,
         listen,
         advertise,
+        port_mapping,
         connect,
         seed,
         proxy,
@@ -627,6 +635,8 @@ async fn run_node(opts: RunOptions) -> Result<()> {
         block_notify: blocknotify,
         metrics,
         max_inbound: crate::config::DEFAULT_MAX_INBOUND,
+        listen_fallback: false,
+        port_mapping,
     };
     let shutdown = Shutdown::listen()?;
     let handle = crate::node::spawn(config).await?;
@@ -635,6 +645,9 @@ async fn run_node(opts: RunOptions) -> Result<()> {
     match handle.listen_addr {
         Some(addr) => log(&format!("peers      listening on {addr}")),
         None => log("peers      outbound only"),
+    }
+    if port_mapping {
+        log("router     asking for a port mapping (PCP, NAT-PMP, UPnP)");
     }
     if i2p.is_some() {
         log("i2p        .i2p peers via the SAM bridge");
@@ -1021,18 +1034,27 @@ mod tests {
     }
 
     #[test]
-    fn advertising_requires_a_listener_and_conflicts_with_private_transports() {
-        let base = ["nulld", "run", "--advertise", "8.8.8.8:19000"];
-        assert!(Cli::try_parse_from(base).is_err());
-        let listener = ["--listen", "0.0.0.0:19000"];
-        assert!(Cli::try_parse_from(base.into_iter().chain(listener)).is_ok());
-        for transport in ["--proxy", "--i2p"] {
-            assert!(Cli::try_parse_from(
-                base.into_iter()
-                    .chain(listener)
-                    .chain([transport, "127.0.0.1:9050"])
-            )
-            .is_err());
+    fn announcing_flags_require_a_listener_and_conflict_with_private_transports() {
+        for flag in [
+            &["--advertise", "8.8.8.8:19000"][..],
+            &["--port-mapping"][..],
+        ] {
+            let base = || ["nulld", "run"].into_iter().chain(flag.iter().copied());
+            assert!(Cli::try_parse_from(base()).is_err(), "{flag:?}");
+            let listener = ["--listen", "0.0.0.0:19000"];
+            assert!(
+                Cli::try_parse_from(base().chain(listener)).is_ok(),
+                "{flag:?}"
+            );
+            for transport in ["--proxy", "--i2p"] {
+                assert!(
+                    Cli::try_parse_from(
+                        base().chain(listener).chain([transport, "127.0.0.1:9050"])
+                    )
+                    .is_err(),
+                    "{flag:?} {transport}"
+                );
+            }
         }
     }
 

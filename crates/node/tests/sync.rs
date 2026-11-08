@@ -63,6 +63,8 @@ async fn follower_syncs_from_miner_and_relays_a_payment() {
         block_notify: None,
         metrics: None,
         max_inbound: 125,
+        listen_fallback: false,
+        port_mapping: false,
     })
     .await
     .unwrap();
@@ -82,6 +84,8 @@ async fn follower_syncs_from_miner_and_relays_a_payment() {
         block_notify: None,
         metrics: None,
         max_inbound: 125,
+        listen_fallback: false,
+        port_mapping: false,
     })
     .await
     .unwrap();
@@ -153,6 +157,8 @@ async fn inbound_connections_are_capped() {
     let node = spawn(Config {
         listen: Some("127.0.0.1:0".parse().unwrap()),
         max_inbound: 2,
+        listen_fallback: false,
+        port_mapping: false,
         ..Config::test()
     })
     .await

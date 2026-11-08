@@ -9,6 +9,7 @@
 //! heights are numbers. See `docs/rpc.md`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,7 +43,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::config::{Network, MEMPOOL_CAPACITY};
 use crate::http::{read_request, respond_with, Request as HttpRequest};
 use crate::miner::Template;
-use crate::node::{Event, Located, NotReady, PeerSummary, Request, Response, Submission, TxStatus};
+use crate::node::{
+    Event, Located, NotReady, PeerSummary, Reachability, Request, Response, Submission, TxStatus,
+};
+use crate::portmap::MappingState;
 use crate::rpc::Token;
 use crate::{now, Error, Result};
 
@@ -915,14 +919,24 @@ async fn other_methods(
                     .filter(|p| p.ready && p.direction == direction)
                     .count()
             };
-            Ok(json!({
+            let reachability = match context.ask(Request::Reachability).await? {
+                Response::Reachability(reachability) => reachability,
+                other => return Err(unexpected(&other)),
+            };
+            let mut info = json!({
                 "network": context.network.to_string(),
                 "protocol_version": PROTOCOL_VERSION,
                 "connections": peers.iter().filter(|p| p.ready).count(),
                 "connections_in": count(Direction::Inbound),
                 "connections_out": count(Direction::Outbound),
                 "handshaking": peers.iter().filter(|p| !p.ready).count(),
-            }))
+            });
+            if let (Some(info), Value::Object(extra)) =
+                (info.as_object_mut(), reachability_json(&reachability))
+            {
+                info.extend(extra);
+            }
+            Ok(info)
         }
         "getconnectioncount" => Ok(json!(context.tip().await?.2)),
         "uptime" => match context.ask(Request::Metrics).await? {
@@ -1102,6 +1116,7 @@ fn variant_name(response: &Response) -> &'static str {
         Response::Stopping => "stopping",
         Response::BlockSubmitted(_) => "block submitted",
         Response::MiningInfo(_) => "mining info",
+        Response::Reachability(_) => "reachability",
         Response::Failed(_) => "failed",
     }
 }
@@ -1261,6 +1276,38 @@ fn status_json(status: TxStatus, tip: u32) -> Value {
     }
 }
 
+/// How other nodes can reach this one, for `getnetworkinfo`.
+fn reachability_json(reachability: &Reachability) -> Value {
+    let addr = |a: Option<SocketAddr>| a.map(|a| a.to_string());
+    json!({
+        "listening": addr(reachability.listen),
+        "announced": addr(reachability.announced),
+        "port_mapping": port_mapping_json(reachability.port_mapping.as_ref()),
+        "reachable": reachability.last_public_inbound.is_some(),
+        "last_public_inbound": reachability.last_public_inbound,
+    })
+}
+
+/// A port mapping state: `state` is `off`, `searching`, `mapped`,
+/// `not_public` (behind another NAT) or `failed`.
+fn port_mapping_json(state: Option<&MappingState>) -> Value {
+    match state {
+        None => json!({ "state": "off" }),
+        Some(MappingState::Searching) => json!({ "state": "searching" }),
+        Some(MappingState::Mapped { protocol, external }) => json!({
+            "state": "mapped",
+            "protocol": protocol.to_string(),
+            "external": external.to_string(),
+        }),
+        Some(MappingState::NotPublic { protocol, external }) => json!({
+            "state": "not_public",
+            "protocol": protocol.to_string(),
+            "external": external.to_string(),
+        }),
+        Some(MappingState::Failed(reason)) => json!({ "state": "failed", "error": reason }),
+    }
+}
+
 fn peer_json(peer: &PeerSummary) -> Value {
     json!({
         "id": peer.id,
@@ -1303,6 +1350,54 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn reachability_reports_listener_mapping_and_evidence() {
+        let reachability = Reachability {
+            listen: Some("0.0.0.0:19000".parse().unwrap()),
+            announced: Some("8.8.8.8:19000".parse().unwrap()),
+            port_mapping: Some(MappingState::Mapped {
+                protocol: crate::portmap::Protocol::NatPmp,
+                external: "8.8.8.8:19000".parse().unwrap(),
+            }),
+            inbound: 2,
+            last_public_inbound: Some(1_700_000_000),
+        };
+        let info = reachability_json(&reachability);
+        assert_eq!(info["listening"], "0.0.0.0:19000");
+        assert_eq!(info["announced"], "8.8.8.8:19000");
+        assert_eq!(info["reachable"], true);
+        assert_eq!(info["port_mapping"]["state"], "mapped");
+        assert_eq!(info["port_mapping"]["protocol"], "NAT-PMP");
+        let unreached = reachability_json(&Reachability {
+            listen: None,
+            announced: None,
+            port_mapping: None,
+            inbound: 0,
+            last_public_inbound: None,
+        });
+        assert_eq!(unreached["listening"], Value::Null);
+        assert_eq!(unreached["reachable"], false);
+        assert_eq!(unreached["port_mapping"]["state"], "off");
+    }
+
+    #[test]
+    fn every_port_mapping_state_has_a_name() {
+        let external = "100.64.0.1:19000".parse().unwrap();
+        let protocol = crate::portmap::Protocol::Upnp;
+        for (state, name) in [
+            (MappingState::Searching, "searching"),
+            (MappingState::Mapped { protocol, external }, "mapped"),
+            (MappingState::NotPublic { protocol, external }, "not_public"),
+            (MappingState::Failed("no router".into()), "failed"),
+        ] {
+            assert_eq!(port_mapping_json(Some(&state))["state"], name);
+        }
+        assert_eq!(
+            port_mapping_json(Some(&MappingState::Failed("no router".into())))["error"],
+            "no router"
+        );
+    }
 
     #[test]
     fn calls_are_validated_before_dispatch() {

@@ -1504,3 +1504,48 @@ its onion service; inbound onion peers all arrive from loopback, which is
 already never banned, and it announces no address. Peer gossip stays
 IP-only: onion peers learn clearnet addresses from it and dial them
 through the same proxy.
+
+## 2026-11-08: Desktop wallets accept peers and map their port by default
+
+Desktop wallets only dialed out, so a wallet could connect to nothing but
+the five seeds. The 2026-10-20 announcements need a reachable listener,
+and almost no home user forwards a port and sets `advertise` by hand.
+
+Chosen: the desktop listens on `0.0.0.0:19000` by default (an OS-chosen
+port if 19000 is taken, so a second node on the machine still starts) and
+asks the router to forward it. PCP is tried first, then NAT-PMP, both one
+UDP exchange with the default gateway; then UPnP IGD (SSDP, then SOAP).
+The external endpoint is announced like an explicit `advertise`: only when
+it is public, so a carrier-grade NAT address is reported to the user and
+not gossiped. It is announced to every ready peer as soon as the router
+answers, not at the next ten-minute exchange, using the existing one
+address inbound allowance. Mappings are leased for an hour and renewed at
+half the lease. They are removed on shutdown. Routers that only keep
+permanent mappings get one, also removed on shutdown. Every search or
+renewal is bounded, because the UPnP library sets no HTTP timeout.
+`nulld` gets `--port-mapping` but keeps it off: servers have public
+addresses.
+
+Reachability is shown from evidence, not inferred from the router: the
+node records when a peer from a public address last finished an inbound
+handshake. Seeds connect to every endpoint announced to them, so that
+inbound handshake is the "seeds can reach you" check, with no new message.
+`getnetworkinfo` reports it with the listener, the announced endpoint and
+the mapping state.
+
+Privacy: a reachable node's IP is gossiped as a NULL node, which an
+outbound-only wallet only revealed to the peers it dialed. Transactions
+are unaffected (Dandelion++ still hides which node sent one), and the Node
+page says what is shared and has a switch to only dial out. A proxy turns
+both off: a Tor user announces nothing, and a mapped port would only
+expose them. Mapping also tells the LAN and the router that the host runs
+a node. A device on the LAN can answer SSDP and claim any external
+address. It gains nothing: seeds only relay an endpoint after their own
+handshake with it succeeds.
+
+Alternatives: keep incoming opt-in (Bitcoin Core's choice for UPnP after
+miniupnpc's vulnerabilities): the network would stay a star around the
+seeds. UPnP only: misses PCP/NAT-PMP routers, and PCP is the protocol
+newer routers implement. An external "what is my IP" service: a
+third-party request revealing every user. IPv4 only for now, since IPv6
+hosts usually have a public address that is already announced.

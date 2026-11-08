@@ -97,6 +97,8 @@ pub(super) struct Inputs {
     pub network: Network,
     /// Whether the log file is written.
     pub log_file: bool,
+    /// Incoming connection switches, saved and running.
+    pub incoming: super::IncomingView,
     /// Cached block facts, handed back with the snapshot.
     pub block_times: BlockTimes,
 }
@@ -172,6 +174,8 @@ impl Inputs {
             wallet_present: self.wallet_path.try_exists().map_err(Error::from)?,
             node: context.call("getblockchaininfo", &params).await?,
             log_file: self.log_file,
+            incoming: Some(self.incoming),
+            network: context.call("getnetworkinfo", &params).await?,
             ..Snapshot::default()
         };
         if let Some(info) = snapshot.node.as_object_mut() {
@@ -290,6 +294,17 @@ mod tests {
                 addr: "127.0.0.1:1".parse().unwrap(),
                 network: Network::Test,
                 log_file: false,
+                incoming: super::super::IncomingView {
+                    saved: config::Incoming {
+                        enabled: false,
+                        port_mapping: false,
+                    },
+                    running: config::Incoming {
+                        enabled: false,
+                        port_mapping: false,
+                    },
+                    rules: super::super::IncomingRules::default(),
+                },
                 block_times: BlockTimes::default(),
             },
         );

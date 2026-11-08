@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,6 +39,7 @@ use crate::logging;
 use crate::metrics::Metrics;
 use crate::miner::Template;
 use crate::peers_file;
+use crate::portmap::{self, MappingState};
 use crate::rpc::{Token, TOKEN_FILE};
 use crate::{now, Error, Result};
 
@@ -146,6 +148,8 @@ pub enum Event {
     Mined(Box<Block>),
     /// The miner wants a template; refused until the node is caught up.
     TemplateRequest(oneshot::Sender<core::result::Result<Template, NotReady>>),
+    /// Automatic port mapping changed state.
+    PortMapping(MappingState),
     /// A local control request.
     Rpc {
         /// The request.
@@ -195,6 +199,8 @@ pub enum Request {
     SubmitBlock(Box<Block>),
     /// What a miner needs to know.
     MiningInfo,
+    /// Whether and how other nodes can connect to this one.
+    Reachability,
 }
 
 /// What became of a submitted block.
@@ -277,6 +283,25 @@ pub struct PeerSummary {
     pub score: u32,
 }
 
+/// Whether and how other nodes can connect to this one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reachability {
+    /// Where the node accepts peers, if it does.
+    pub listen: Option<SocketAddr>,
+    /// The endpoint announced to peers, if any: an explicit `advertise`,
+    /// a public port mapping, or a public listening interface.
+    pub announced: Option<SocketAddr>,
+    /// Automatic port mapping, or `None` when it is off.
+    pub port_mapping: Option<MappingState>,
+    /// Inbound peers past the handshake now.
+    pub inbound: usize,
+    /// When a peer from a public address last finished an inbound
+    /// handshake. Seeds check every endpoint announced to them by
+    /// connecting to it, so this is the evidence that others can reach
+    /// this node; `None` if none has since the node started.
+    pub last_public_inbound: Option<u64>,
+}
+
 /// Local control responses.
 #[derive(Debug)]
 pub enum Response {
@@ -327,6 +352,8 @@ pub enum Response {
     BlockSubmitted(Submission),
     /// Mining state.
     MiningInfo(Box<MiningInfo>),
+    /// Inbound reachability.
+    Reachability(Box<Reachability>),
     /// The request failed.
     Failed(String),
 }
@@ -400,6 +427,10 @@ pub struct Node {
     /// Whether the listener takes IPv4 too; see [`discovery::accepts_ipv4`].
     listen_accepts_ipv4: bool,
     advertise: Option<SocketAddr>,
+    /// Automatic port mapping, or `None` when off; see [`crate::portmap`].
+    mapping: Option<MappingState>,
+    /// See [`Reachability::last_public_inbound`].
+    last_public_inbound: Option<u64>,
     /// Targets and addresses that turned out to be this node; never redialed.
     own: OwnEndpoints,
     proxy: Option<SocketAddr>,
@@ -440,6 +471,8 @@ pub struct Handle {
     pub metrics_addr: Option<SocketAddr>,
     task: JoinHandle<()>,
     tasks: JoinSet<()>,
+    /// The port mapping, removed from the router on shutdown.
+    port_mapping: Option<portmap::Task>,
 }
 
 impl Handle {
@@ -468,6 +501,9 @@ impl Handle {
 
     /// Stops the node and waits for the loop to exit.
     pub async fn shutdown(mut self) {
+        if let Some(mapping) = self.port_mapping.take() {
+            mapping.stop().await;
+        }
         let _ = self.events.send(Event::Shutdown).await;
         let _ = self.task.await;
         self.tasks.shutdown().await;
@@ -492,14 +528,15 @@ pub async fn spawn(config: Config) -> Result<Handle> {
     let (events, receiver) = mpsc::channel(4_096);
     let tip = watch::Sender::new(chain.tip()?.hash);
 
-    let (listen_addr, listen_accepts_ipv4) = match bind(config.listen).await? {
-        Some((listener, local)) => {
-            let accepts_ipv4 = discovery::accepts_ipv4(&listener);
-            tasks.spawn(crate::net::listen(listener, events.clone(), 1 << 40));
-            (Some(local), accepts_ipv4)
-        }
-        None => (None, false),
-    };
+    let (listen_addr, listen_accepts_ipv4) =
+        match bind_listener(config.listen, config.listen_fallback).await? {
+            Some((listener, local)) => {
+                let accepts_ipv4 = discovery::accepts_ipv4(&listener);
+                tasks.spawn(crate::net::listen(listener, events.clone(), 1 << 40));
+                (Some(local), accepts_ipv4)
+            }
+            None => (None, false),
+        };
     let (rpc_addr, rpc_http_addr, rpc_token) = serve_rpc(&config, &events, &mut tasks).await?;
     let metrics_addr = match bind(config.metrics).await? {
         Some((listener, local)) => {
@@ -522,6 +559,8 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         }
     });
 
+    let (port_mapping, mapping) =
+        start_port_mapping(&config, listen_addr, listen_accepts_ipv4, &events).await;
     let rng = StdRng::from_entropy();
     let (peers_path, book) = saved_book(&config);
     let node = Node {
@@ -543,6 +582,8 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         listen_addr,
         listen_accepts_ipv4,
         advertise: config.advertise,
+        mapping,
+        last_public_inbound: None,
         own: OwnEndpoints::default(),
         proxy: config.proxy,
         i2p,
@@ -570,7 +611,35 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         metrics_addr,
         task,
         tasks,
+        port_mapping,
     })
+}
+
+/// Starts port mapping when configured and the listener takes IPv4, the
+/// only family mapped. Returns the task and the state it starts in.
+async fn start_port_mapping(
+    config: &Config,
+    listen: Option<SocketAddr>,
+    accepts_ipv4: bool,
+    events: &mpsc::Sender<Event>,
+) -> (Option<portmap::Task>, Option<MappingState>) {
+    if !config.port_mapping {
+        return (None, None);
+    }
+    let port = listen.and_then(|l| NonZeroU16::new(l.port()));
+    match port.filter(|_| accepts_ipv4) {
+        Some(port) => {
+            let routers = portmap::Routers::system().await;
+            let task = portmap::Task::spawn(routers, port, config.network, events.clone());
+            (Some(task), Some(MappingState::Searching))
+        }
+        None => (
+            None,
+            Some(MappingState::Failed(
+                "the listener does not accept IPv4, the only family mapped".into(),
+            )),
+        ),
+    }
 }
 
 /// Starts the control socket and the JSON-RPC endpoint, whichever are
@@ -644,6 +713,26 @@ async fn bind(addr: Option<SocketAddr>) -> Result<Option<(TcpListener, SocketAdd
             Ok(Some((listener, local)))
         }
         None => Ok(None),
+    }
+}
+
+/// Binds the peer listener. With `fallback`, a taken port is replaced by
+/// one the system picks, so a second node on the machine still starts.
+async fn bind_listener(
+    addr: Option<SocketAddr>,
+    fallback: bool,
+) -> Result<Option<(TcpListener, SocketAddr)>> {
+    match (bind(addr).await, addr) {
+        (Err(Error::Io(error)), Some(addr))
+            if fallback && error.kind() == std::io::ErrorKind::AddrInUse =>
+        {
+            logging::warn(&format!(
+                "port {} is in use, listening on another one",
+                addr.port()
+            ));
+            bind(Some(SocketAddr::new(addr.ip(), 0))).await
+        }
+        (result, _) => result,
     }
 }
 
@@ -783,6 +872,10 @@ impl Node {
                 Ok(())
             }
             Event::Mined(block) => self.on_mined(&block),
+            Event::PortMapping(state) => {
+                self.on_port_mapping(state);
+                Ok(())
+            }
             Event::TemplateRequest(reply) => {
                 let template = match self.mining_blocker()? {
                     Some(blocker) => Err(blocker),
@@ -958,6 +1051,9 @@ impl Node {
             "peer {id} ready ({direction:?} {}), height {}",
             handle.target, info.best_height
         ));
+        if direction == Direction::Inbound && discovery::allowed(addr, self.network) {
+            self.last_public_inbound = Some(now());
+        }
         if direction == Direction::Outbound {
             // Record the peer we dialed so it can be gossiped onward,
             // unless it was reached through the proxy or the SAM bridge,
@@ -1058,18 +1154,20 @@ impl Node {
         let Some(handle) = self.peers.get_mut(&id) else {
             return;
         };
-        let local = handle.local;
         let direction = handle.peer.direction();
         handle.addr_allowance = discovery::addr_allowance(direction);
-        let listen = (self.max_inbound > 0).then_some(self.listen_addr).flatten();
-        if let Some(addr) = discovery::announcement(
-            listen,
-            self.advertise,
-            local,
-            self.network,
-            self.private_transport(),
-            self.listen_accepts_ipv4,
-        ) {
+        self.announce_to(id);
+        if direction == Direction::Outbound {
+            self.send(id, Message::GetAddr);
+        }
+    }
+
+    /// Sends a peer our own endpoint, if we have one to announce.
+    fn announce_to(&mut self, id: PeerId) {
+        let Some(local) = self.peers.get(&id).map(|h| h.local) else {
+            return;
+        };
+        if let Some(addr) = self.announcement(local) {
             let (ip, port) = addr_key(addr);
             self.own.addrs.insert((ip, port));
             self.send(
@@ -1081,8 +1179,56 @@ impl Node {
                 }]),
             );
         }
-        if direction == Direction::Outbound {
-            self.send(id, Message::GetAddr);
+    }
+
+    /// The endpoint to announce over a connection from `local`: an
+    /// explicit `advertise`, else a public port mapping, else a public
+    /// listening interface.
+    fn announcement(&self, local: Option<SocketAddr>) -> Option<SocketAddr> {
+        let listen = (self.max_inbound > 0).then_some(self.listen_addr).flatten();
+        let mapped = self.mapping.as_ref().and_then(MappingState::announced);
+        discovery::announcement(
+            listen,
+            self.advertise.or(mapped),
+            local,
+            self.network,
+            self.private_transport(),
+            self.listen_accepts_ipv4,
+        )
+    }
+
+    /// Records a port mapping change. A newly mapped endpoint is announced
+    /// to every ready peer at once rather than at the next exchange, so
+    /// the seeds can check it within seconds of the router answering.
+    fn on_port_mapping(&mut self, state: MappingState) {
+        let before = self.mapping.as_ref().and_then(MappingState::announced);
+        let after = state.announced();
+        self.mapping = Some(state);
+        if after.is_some() && after != before {
+            let ready: Vec<PeerId> = self
+                .peers
+                .iter()
+                .filter(|(_, h)| h.peer.is_ready())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in ready {
+                self.announce_to(id);
+            }
+        }
+    }
+
+    fn reachability(&self) -> Reachability {
+        let local = self
+            .peers
+            .values()
+            .find(|h| h.peer.is_ready() && h.peer.direction() == Direction::Outbound)
+            .and_then(|h| h.local);
+        Reachability {
+            listen: self.listen_addr,
+            announced: self.announcement(local),
+            port_mapping: self.mapping.clone(),
+            inbound: self.ready_peers(Direction::Inbound),
+            last_public_inbound: self.last_public_inbound,
         }
     }
 
@@ -1898,6 +2044,12 @@ impl Node {
             .chain(self.own.addrs.iter().copied())
             .chain(self.listen_addr.map(addr_key))
             .chain(self.advertise.map(addr_key))
+            .chain(
+                self.mapping
+                    .as_ref()
+                    .and_then(MappingState::announced)
+                    .map(addr_key),
+            )
             .chain(self.dialing.values().filter_map(|s| dialed_key(s)))
             .collect();
         let candidate = if full {
@@ -1934,6 +2086,7 @@ impl Node {
                 })
             }
             Request::Metrics => Ok(Response::Metrics(Box::new(self.metrics()?))),
+            Request::Reachability => Ok(Response::Reachability(Box::new(self.reachability()))),
             Request::MiningReadiness => Ok(Response::MiningReadiness(self.mining_readiness()?)),
             Request::BlockByHash(hash) => Ok(Response::Block(
                 self.chain.store().block(&hash)?.map(Box::new),
@@ -2122,6 +2275,17 @@ mod tests {
             Some("[2606:4700::1111]:19000".parse().unwrap())
         );
         assert_eq!(dialed_key("abcdef.onion:19000"), None);
+    }
+
+    #[tokio::test]
+    async fn a_taken_listen_port_falls_back_to_another_only_when_allowed() {
+        let taken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = taken.local_addr().unwrap();
+        assert!(bind_listener(Some(addr), false).await.is_err());
+        let (_listener, bound) = bind_listener(Some(addr), true).await.unwrap().unwrap();
+        assert_eq!(bound.ip(), addr.ip());
+        assert_ne!(bound.port(), addr.port());
+        assert!(bind_listener(None, true).await.unwrap().is_none());
     }
 
     #[tokio::test]

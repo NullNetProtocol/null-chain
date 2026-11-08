@@ -34,6 +34,11 @@ subtle.workspace = true
 zeroize.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 socket2.workspace = true
+# Router port mapping (`portmap`): PCP and NAT-PMP, the default gateway
+# they talk to, and UPnP IGD.
+crab_nat = { version = "0.8", default-features = false }
+netdev = { version = "0.47", default-features = false, features = ["gateway"] }
+igd-next = { version = "0.17.1", default-features = false, features = ["aio_tokio"] }
 
 [dev-dependencies]
 rand_chacha.workspace = true
