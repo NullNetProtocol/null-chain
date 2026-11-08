@@ -486,8 +486,8 @@ mod tests {
         }
         assert_eq!(method_token("  getblockhash 0"), "getblockhash");
         assert_eq!(method_token("help"), "help");
-        assert!(matching_methods("getseed").is_empty());
-        assert!(matching_methods("setseed").is_empty());
+        assert_eq!(matching_methods("getseed").len(), 0);
+        assert_eq!(matching_methods("setseed").len(), 0);
     }
 
     #[test]

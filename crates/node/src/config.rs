@@ -239,13 +239,13 @@ mod tests {
     fn the_test_network_has_no_public_seeds() {
         assert_eq!(Network::Test.seeds().len(), 0);
         assert_eq!(Network::Test.onion_seeds().len(), 0);
-        assert!(Network::Test.bootstrap_seeds(true).is_empty());
+        assert_eq!(Network::Test.bootstrap_seeds(true), Vec::<&str>::new());
     }
 
     #[test]
     fn main_onion_seeds_are_v3_onions_on_the_default_port() {
         let seeds = Network::Main.onion_seeds();
-        assert!(!seeds.is_empty());
+        assert_ne!(seeds.len(), 0, "no onion seeds");
         for seed in seeds {
             let (host, port) = seed.rsplit_once(':').unwrap();
             assert_eq!(port.parse::<u16>().unwrap(), DEFAULT_P2P_PORT, "{seed}");
