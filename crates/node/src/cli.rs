@@ -168,6 +168,11 @@ pub enum Command {
         /// data directory when omitted.
         #[arg(long, env = TOKEN_ENV, hide_env_values = true)]
         rpc_token: Option<String>,
+        /// Serve the public light-wallet listener on this address: no
+        /// token, read-only methods plus transaction submission, for
+        /// mobile and web wallets. Put a rate-limiting proxy in front.
+        #[arg(long)]
+        light_listen: Option<SocketAddr>,
         /// Serve Prometheus metrics at `GET /metrics` on this address.
         #[arg(long)]
         metrics: Option<SocketAddr>,
@@ -367,6 +372,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             rpc,
             rpc_http,
             rpc_token,
+            light_listen,
             metrics,
             blocknotify,
             log_level,
@@ -389,6 +395,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 rpc,
                 rpc_http,
                 rpc_token: token,
+                light_listen,
                 metrics,
                 blocknotify,
             })
@@ -583,6 +590,7 @@ struct RunOptions {
     rpc: SocketAddr,
     rpc_http: Option<SocketAddr>,
     rpc_token: Option<Token>,
+    light_listen: Option<SocketAddr>,
     metrics: Option<SocketAddr>,
     blocknotify: Option<String>,
 }
@@ -603,6 +611,7 @@ async fn run_node(opts: RunOptions) -> Result<()> {
         rpc,
         rpc_http,
         rpc_token,
+        light_listen,
         metrics,
         blocknotify,
     } = opts;
@@ -632,6 +641,7 @@ async fn run_node(opts: RunOptions) -> Result<()> {
         rpc: Some(rpc),
         rpc_http,
         rpc_token,
+        light_listen,
         block_notify: blocknotify,
         metrics,
         max_inbound: crate::config::DEFAULT_MAX_INBOUND,
@@ -659,6 +669,10 @@ async fn run_node(opts: RunOptions) -> Result<()> {
     match handle.rpc_http_addr {
         Some(addr) => log(&format!("json-rpc   http://{addr}/")),
         None => log("json-rpc   disabled"),
+    }
+    match handle.light_addr {
+        Some(addr) => log(&format!("light      http://{addr}/ (public)")),
+        None => log("light      disabled"),
     }
     match handle.metrics_addr {
         Some(addr) => log(&format!("metrics    {addr}")),

@@ -41,7 +41,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{Network, MEMPOOL_CAPACITY};
-use crate::http::{read_request, respond_with, Request as HttpRequest};
+use crate::http::{read_request, respond_with_headers, Request as HttpRequest};
 use crate::miner::Template;
 use crate::node::{
     Event, Located, NotReady, PeerSummary, Reachability, Request, Response, Submission, TxStatus,
@@ -280,6 +280,11 @@ impl Context {
         }
     }
 
+    /// The network this node runs.
+    pub(crate) fn network(&self) -> Network {
+        self.network
+    }
+
     async fn proving_key(&self) -> core::result::Result<Arc<ProvingKey>, RpcError> {
         self.proving_key
             .get_or_try_init(|| async {
@@ -381,7 +386,10 @@ impl Context {
         }
     }
 
-    async fn tip(&self) -> core::result::Result<(u32, BlockHash, usize, usize, bool), RpcError> {
+    /// Height, hash, peer count, mempool size and whether syncing.
+    pub(crate) async fn tip(
+        &self,
+    ) -> core::result::Result<(u32, BlockHash, usize, usize, bool), RpcError> {
         match self.ask(Request::Status).await? {
             Response::Status {
                 height,
@@ -459,18 +467,79 @@ pub async fn serve(
 /// Serves `dispatcher`'s methods forever behind `token`, one request per
 /// connection.
 pub async fn serve_with<D: Dispatch>(listener: TcpListener, token: Token, dispatcher: D) {
+    serve_policy(listener, Policy::private(token), dispatcher).await;
+}
+
+/// How a listener admits requests: the private endpoints demand the
+/// token; a public one (the light-wallet listener) takes anyone but bounds
+/// what each connection may cost.
+#[derive(Clone, Debug)]
+pub struct Policy {
+    /// The bearer token every request must carry, or `None` for a public
+    /// listener.
+    pub token: Option<Token>,
+    /// Largest request body accepted.
+    pub max_body: usize,
+    /// Most calls in one batch.
+    pub max_batch: usize,
+    /// Answer CORS preflights and allow any origin, for browser wallets.
+    pub cors: bool,
+    /// Longest one connection may take, reading through answering, or
+    /// `None` for no limit.
+    pub deadline: Option<Duration>,
+    /// Connections served at once; further ones are closed unanswered.
+    /// `None` for no limit.
+    pub max_connections: Option<usize>,
+}
+
+impl Policy {
+    /// The token-protected endpoint: large bodies (blocks), no caps.
+    pub fn private(token: Token) -> Self {
+        Self {
+            token: Some(token),
+            max_body: MAX_BODY,
+            max_batch: usize::MAX,
+            cors: false,
+            deadline: None,
+            max_connections: None,
+        }
+    }
+}
+
+/// Serves `dispatcher`'s methods forever under `policy`, one request per
+/// connection.
+pub async fn serve_policy<D: Dispatch>(listener: TcpListener, policy: Policy, dispatcher: D) {
+    let slots = policy
+        .max_connections
+        .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
     while let Ok((stream, _)) = listener.accept().await {
+        let permit = match &slots {
+            Some(slots) => match Arc::clone(slots).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => continue,
+            },
+            None => None,
+        };
         let dispatcher = dispatcher.clone();
-        let token = token.clone();
+        let policy = policy.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             let mut stream = stream;
-            let _ = handle(&mut stream, &dispatcher, &token).await;
+            let served = handle(&mut stream, &dispatcher, &policy);
+            let _ = match policy.deadline {
+                Some(limit) => tokio::time::timeout(limit, served).await.unwrap_or(Ok(())),
+                None => served.await,
+            };
         });
     }
 }
 
-async fn handle<D: Dispatch>(stream: &mut TcpStream, dispatcher: &D, token: &Token) -> Result<()> {
-    let request = match read_request(stream, MAX_BODY).await {
+async fn handle<D: Dispatch>(
+    stream: &mut TcpStream,
+    dispatcher: &D,
+    policy: &Policy,
+) -> Result<()> {
+    let request = match read_request(stream, policy.max_body).await {
         Ok(request) => request,
         Err(Error::Io(error)) => return Err(Error::Io(error)),
         Err(error) => {
@@ -478,22 +547,51 @@ async fn handle<D: Dispatch>(stream: &mut TcpStream, dispatcher: &D, token: &Tok
                 &RpcError::new(INVALID_REQUEST, error.to_string()),
                 &Value::Null,
             );
-            return respond_json(stream, "400 Bad Request", &body).await;
+            return respond_json(stream, policy, "400 Bad Request", &body).await;
         }
     };
+    if policy.cors && request.method == "OPTIONS" {
+        return respond_with_headers(stream, "204 No Content", "text/plain", PREFLIGHT, &[]).await;
+    }
     if request.method != "POST" {
         let body = envelope_error(&RpcError::new(INVALID_REQUEST, "POST only"), &Value::Null);
-        return respond_json(stream, "405 Method Not Allowed", &body).await;
+        return respond_json(stream, policy, "405 Method Not Allowed", &body).await;
     }
-    if !authorized(&request, token) {
-        let body = envelope_error(&RpcError::new(UNAUTHORIZED, "unauthorized"), &Value::Null);
-        return respond_json(stream, "401 Unauthorized", &body).await;
+    if let Some(token) = &policy.token {
+        if !authorized(&request, token) {
+            let body = envelope_error(&RpcError::new(UNAUTHORIZED, "unauthorized"), &Value::Null);
+            return respond_json(stream, policy, "401 Unauthorized", &body).await;
+        }
     }
     let response = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(body) if batch_len(&body) > policy.max_batch => envelope_error(
+            &RpcError::new(
+                INVALID_REQUEST,
+                format!("at most {} calls per batch", policy.max_batch),
+            ),
+            &Value::Null,
+        ),
         Ok(body) => process(dispatcher, body).await,
         Err(error) => envelope_error(&RpcError::new(PARSE_ERROR, error.to_string()), &Value::Null),
     };
-    respond_json(stream, "200 OK", &response).await
+    respond_json(stream, policy, "200 OK", &response).await
+}
+
+/// The headers a CORS preflight is answered with: any origin may `POST`
+/// JSON. Nothing on a public listener depends on cookies or credentials.
+const PREFLIGHT: &[(&str, &str)] = &[
+    ("Access-Control-Allow-Origin", "*"),
+    ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+    ("Access-Control-Allow-Headers", "Content-Type"),
+    ("Access-Control-Max-Age", "86400"),
+];
+
+/// The header every response on a CORS listener carries.
+const ALLOW_ANY_ORIGIN: &[(&str, &str)] = &[("Access-Control-Allow-Origin", "*")];
+
+/// Calls in `body`: its length for a batch, one otherwise.
+fn batch_len(body: &Value) -> usize {
+    body.as_array().map_or(1, Vec::len)
 }
 
 /// Whether the request carries the token as a bearer credential.
@@ -504,9 +602,15 @@ fn authorized(request: &HttpRequest, token: &Token) -> bool {
         .is_some_and(|presented| token.matches(presented.trim()))
 }
 
-async fn respond_json(stream: &mut TcpStream, status: &str, body: &Value) -> Result<()> {
+async fn respond_json(
+    stream: &mut TcpStream,
+    policy: &Policy,
+    status: &str,
+    body: &Value,
+) -> Result<()> {
     let bytes = serde_json::to_vec(body).unwrap_or_default();
-    respond_with(stream, status, "application/json", &bytes).await
+    let extra = if policy.cors { ALLOW_ANY_ORIGIN } else { &[] };
+    respond_with_headers(stream, status, "application/json", extra, &bytes).await
 }
 
 /// Answers one call or one batch. Public so tests can drive it without
@@ -1350,6 +1454,76 @@ mod tests {
     }
 
     use super::*;
+
+    /// Answers every method with its own name.
+    #[derive(Clone)]
+    struct Echo;
+
+    impl Dispatch for Echo {
+        fn call(
+            &self,
+            method: &str,
+            _: &Params,
+        ) -> impl core::future::Future<Output = core::result::Result<Value, RpcError>> + Send
+        {
+            std::future::ready(Ok(json!(method)))
+        }
+    }
+
+    async fn ask(addr: SocketAddr, request: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        let _ = stream.read_to_string(&mut reply).await;
+        reply
+    }
+
+    const CALL: &str = "POST / HTTP/1.1\r\nContent-Length: 38\r\n\r\n\
+        {\"jsonrpc\":\"2.0\",\"method\":\"hi\",\"id\":1}";
+
+    #[tokio::test]
+    async fn public_policies_cap_connections_and_drop_slow_clients() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let policy = Policy {
+            token: None,
+            max_body: 1024,
+            max_batch: 1,
+            cors: false,
+            deadline: Some(Duration::from_millis(300)),
+            max_connections: Some(1),
+        };
+        tokio::spawn(serve_policy(listener, policy, Echo));
+        assert!(ask(addr, CALL).await.contains("\"result\":\"hi\""));
+
+        // A client that never finishes its request holds the only slot...
+        let idle = TcpStream::connect(addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(ask(addr, CALL).await, "", "closed unanswered while full");
+        // ...until the deadline frees it.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(ask(addr, CALL).await.contains("\"result\":\"hi\""));
+        drop(idle);
+
+        let batch = "POST / HTTP/1.1\r\nContent-Length: 7\r\n\r\n[{},{}]";
+        assert!(ask(addr, batch).await.contains("at most 1 calls per batch"));
+    }
+
+    #[tokio::test]
+    async fn private_policies_demand_the_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let token = Token::new("hunter2").unwrap();
+        tokio::spawn(serve_with(listener, token, Echo));
+        assert!(ask(addr, CALL).await.starts_with("HTTP/1.1 401"));
+        let preflight = ask(addr, "OPTIONS / HTTP/1.1\r\n\r\n").await;
+        assert!(
+            preflight.starts_with("HTTP/1.1 405"),
+            "no CORS: {preflight}"
+        );
+        assert!(!preflight.contains("Access-Control"));
+    }
 
     #[test]
     fn reachability_reports_listener_mapping_and_evidence() {

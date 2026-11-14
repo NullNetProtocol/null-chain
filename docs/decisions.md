@@ -1549,3 +1549,28 @@ seeds. UPnP only: misses PCP/NAT-PMP routers, and PCP is the protocol
 newer routers implement. An external "what is my IP" service: a
 third-party request revealing every user. IPv4 only for now, since IPv6
 hosts usually have a public address that is already announced.
+
+## 2026-11-14: A public light-wallet listener in nulld
+
+The mobile (APK) and web wallets sync with compact blocks, which were only
+served behind the node's token. A phone or a browser cannot hold an
+operator's token.
+
+Alternatives: serve compact blocks from the explorer API; a separate
+lightwalletd-style daemon; open the existing JSON-RPC with a public token.
+
+Chosen: an opt-in listener in `nulld` (`--light-listen`), separate from
+the control socket and the authenticated JSON-RPC, with its own allowlist.
+The node already has the data, with no indexer lag. The format ships with
+the node release. Every seed, and any community node, can serve wallets,
+and the explorer stays an explorer. A public token would expose `stop`,
+peers and mining. The listener reuses the JSON-RPC layer through a
+`Policy` (token or none, body, batch, deadline, connection caps, CORS),
+so both share one parser and one dispatch.
+
+Privacy: the methods take only heights, raw transactions and txids. A
+server learns a client's IP and when it submits, not its notes.
+`getnullifierstatus` is excluded because asking reveals the note.
+Per-client rate limits are left to the reverse proxy, which is the only
+place that sees client addresses on a seed. Tor for wallets is later
+work.

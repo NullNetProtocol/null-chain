@@ -72,6 +72,117 @@ async fn call_err(addr: SocketAddr, token: &str, method: &str, params: Value) ->
     reply["error"]["code"].as_i64().unwrap()
 }
 
+/// One raw request on the light listener; returns the whole response.
+async fn raw(addr: SocketAddr, request: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).await.unwrap();
+    reply
+}
+
+/// The public light listener: no token, CORS, only its methods, bounded
+/// ranges and batches, and enough to bring a light wallet to the tip.
+async fn light_wallet_syncs_and_finds_the_payment(
+    node: &Handle,
+    receiver_sk: &SpendingKey,
+    genesis: null_protocol::block::BlockHash,
+    rng: &mut ChaCha20Rng,
+) {
+    let light = node.light_addr.unwrap();
+    let ask = async |method: &str, params: Value| {
+        let body = json!({"jsonrpc": "2.0", "method": method, "params": params, "id": 1});
+        post(light, None, &body.to_string()).await.1
+    };
+    let info = ask("getlightinfo", json!([])).await["result"].clone();
+    assert_eq!(info["network"], "test");
+    assert_eq!(info["genesis"], genesis.to_string());
+    let tip = u32::try_from(info["height"].as_u64().unwrap()).unwrap();
+    assert_eq!(
+        info["coinbase_maturity"],
+        Network::Test.params().coinbase_maturity
+    );
+
+    // Nothing private or operational is reachable without the token.
+    for method in [
+        "stop",
+        "getpeerinfo",
+        "getnullifierstatus",
+        "getblocktemplate",
+        "help",
+    ] {
+        assert_eq!(
+            ask(method, json!([])).await["error"]["code"],
+            METHOD_NOT_FOUND,
+            "{method}"
+        );
+    }
+    assert_eq!(
+        ask("getcompactblocks", json!([0, 101])).await["error"]["code"],
+        INVALID_PARAMS
+    );
+    let call = json!({"jsonrpc": "2.0", "method": "getlightinfo", "id": 1});
+    let batch = Value::Array(vec![call; 9]).to_string();
+    assert_eq!(
+        post(light, None, &batch).await.1["error"]["code"],
+        INVALID_REQUEST
+    );
+    let big = raw(light, "POST / HTTP/1.1\r\nContent-Length: 300000\r\n\r\n").await;
+    assert!(
+        big.starts_with("HTTP/1.1 400 Bad Request"),
+        "body over the limit: {big}"
+    );
+
+    // Browsers may call it from any origin.
+    let preflight = raw(
+        light,
+        "OPTIONS / HTTP/1.1\r\nOrigin: https://wallet.example\r\n\
+         Access-Control-Request-Method: POST\r\n\r\n",
+    )
+    .await;
+    assert!(
+        preflight.starts_with("HTTP/1.1 204 No Content"),
+        "{preflight}"
+    );
+    assert!(preflight.contains("Access-Control-Allow-Origin: *"));
+    assert!(preflight.contains("Access-Control-Allow-Headers: Content-Type"));
+    let body = json!({"jsonrpc": "2.0", "method": "getlightinfo", "id": 1}).to_string();
+    let answer = raw(
+        light,
+        &format!(
+            "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+    .await;
+    assert!(
+        answer.contains("Access-Control-Allow-Origin: *"),
+        "{answer}"
+    );
+
+    // Hashes and compact blocks in ranges agree with the single calls.
+    let hashes = ask("getblockhashes", json!([0, 3])).await["result"].clone();
+    assert_eq!(hashes[0], genesis.to_string());
+    assert_eq!(hashes[2], ask("getblockhash", json!([2])).await["result"]);
+    let past = ask("getblockhashes", json!([tip + 1, 5])).await["result"].clone();
+    assert_eq!(past, json!([]));
+
+    // A wallet that only ever talks to this listener sees the payment.
+    let wallet = Wallet::in_memory(receiver_sk, genesis, rng).unwrap();
+    while wallet.next_height().unwrap() <= tip {
+        let start = wallet.next_height().unwrap();
+        let blocks = ask("getcompactblocks", json!([start, 100])).await["result"].clone();
+        let blocks = blocks.as_array().unwrap();
+        assert_ne!(blocks.len(), 0, "no progress at height {start}");
+        for hex in blocks {
+            let block =
+                CompactBlock::from_slice(&from_hex(hex.as_str().unwrap()).unwrap()).unwrap();
+            wallet.scan_compact(&block).unwrap();
+        }
+    }
+    assert_eq!(wallet.balance().unwrap(), 1_000);
+}
+
 async fn height(handle: &Handle) -> u32 {
     match handle.request(Request::Status).await.unwrap() {
         Response::Status { height, .. } => height,
@@ -95,7 +206,8 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
     let mut rng = ChaCha20Rng::seed_from_u64(7);
     let miner_sk = SpendingKey::random(&mut rng);
     let miner_keys = WalletKeys::from_spending_key(miner_sk.clone()).unwrap();
-    let receiver = WalletKeys::from_spending_key(SpendingKey::random(&mut rng)).unwrap();
+    let receiver_sk = SpendingKey::random(&mut rng);
+    let receiver = WalletKeys::from_spending_key(receiver_sk.clone()).unwrap();
     let token = Token::new("hunter2").unwrap();
     let node = spawn(Config {
         network: Network::Test,
@@ -110,6 +222,7 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
         rpc: None,
         rpc_http: Some("127.0.0.1:0".parse().unwrap()),
         rpc_token: Some(token.clone()),
+        light_listen: Some("127.0.0.1:0".parse().unwrap()),
         block_notify: None,
         metrics: None,
         max_inbound: 125,
@@ -311,6 +424,8 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
         .await["spent"],
         true
     );
+
+    light_wallet_syncs_and_finds_the_payment(&node, &receiver_sk, genesis.hash(), &mut rng).await;
 
     // Network and operations.
     assert_eq!(call(addr, t, "getpeerinfo", json!([])).await, json!([]));

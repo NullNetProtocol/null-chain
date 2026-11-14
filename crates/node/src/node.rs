@@ -467,6 +467,8 @@ pub struct Handle {
     pub rpc_http_addr: Option<SocketAddr>,
     /// The control socket's token, if enabled.
     pub rpc_token: Option<Token>,
+    /// Where the light-wallet listener listens, if enabled.
+    pub light_addr: Option<SocketAddr>,
     /// Where the metrics endpoint listens, if enabled.
     pub metrics_addr: Option<SocketAddr>,
     task: JoinHandle<()>,
@@ -538,13 +540,7 @@ pub async fn spawn(config: Config) -> Result<Handle> {
             None => (None, false),
         };
     let (rpc_addr, rpc_http_addr, rpc_token) = serve_rpc(&config, &events, &mut tasks).await?;
-    let metrics_addr = match bind(config.metrics).await? {
-        Some((listener, local)) => {
-            tasks.spawn(crate::metrics::serve(listener, events.clone()));
-            Some(local)
-        }
-        None => None,
-    };
+    let (metrics_addr, light_addr) = serve_public(&config, &events, &mut tasks).await?;
     if let Some(payout) = config.mine_to {
         spawn_miner(&mut tasks, payout, &config, &events, &tip);
     }
@@ -608,6 +604,7 @@ pub async fn spawn(config: Config) -> Result<Handle> {
         rpc_addr,
         rpc_http_addr,
         rpc_token,
+        light_addr,
         metrics_addr,
         task,
         tasks,
@@ -679,6 +676,34 @@ async fn serve_rpc(
         None => None,
     };
     Ok((rpc_addr, rpc_http_addr, Some(token)))
+}
+
+/// Starts the token-less endpoints, whichever are configured: metrics and
+/// the light-wallet listener.
+async fn serve_public(
+    config: &Config,
+    events: &mpsc::Sender<Event>,
+    tasks: &mut JoinSet<()>,
+) -> Result<(Option<SocketAddr>, Option<SocketAddr>)> {
+    let metrics_addr = match bind(config.metrics).await? {
+        Some((listener, local)) => {
+            tasks.spawn(crate::metrics::serve(listener, events.clone()));
+            Some(local)
+        }
+        None => None,
+    };
+    let light_addr = match bind(config.light_listen).await? {
+        Some((listener, local)) => {
+            tasks.spawn(crate::light::serve(
+                listener,
+                events.clone(),
+                config.network,
+            ));
+            Some(local)
+        }
+        None => None,
+    };
+    Ok((metrics_addr, light_addr))
 }
 
 /// Opens the chain store and builds the verifying key.
@@ -2295,6 +2320,7 @@ mod tests {
             listen: local,
             rpc: local,
             rpc_http: local,
+            light_listen: local,
             metrics: local,
             ..Config::test()
         })
@@ -2304,6 +2330,7 @@ mod tests {
             node.listen_addr,
             node.rpc_addr,
             node.rpc_http_addr,
+            node.light_addr,
             node.metrics_addr,
         ];
         node.shutdown().await;

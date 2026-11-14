@@ -6,6 +6,7 @@
 //! - [`miner`]: the block template and mining task.
 //! - [`rpc`]: the local line-oriented control socket.
 //! - [`jsonrpc`]: JSON-RPC 2.0 over HTTP, for exchanges, pools and tools.
+//! - [`light`]: the public, read-only listener mobile and web wallets sync from.
 //! - [`cli`]: the `nulld` commands.
 //! - [`faucet`]: an HTTP faucet paying from a wallet through a node.
 //! - [`walletd`]: the `null-wallet-rpc` daemon for exchanges.
@@ -30,6 +31,7 @@ pub mod faucet;
 pub mod http;
 pub mod i2p;
 pub mod jsonrpc;
+pub mod light;
 pub mod logging;
 pub mod metrics;
 pub mod miner;

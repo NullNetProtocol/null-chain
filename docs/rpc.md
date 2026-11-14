@@ -408,6 +408,50 @@ wallets and multisig do not exist; multisig on a shielded pool needs a
 threshold spend-authorization scheme (FROST over RedPallas is the known
 design) and should be planned, not promised.
 
+## Phase 5: the light-wallet listener (done 2026-11-14)
+
+Mobile and browser wallets cannot hold the token, so they sync from a
+separate, public listener: `nulld run --light-listen <addr>`. It is off by
+default. Same JSON-RPC 2.0 envelopes and conventions as above, but:
+
+- **No token.** It exposes only the methods below. Nothing touches the
+  mempool except submission, and nothing about peers, mining or operations
+  is available, so there is no `stop`.
+- **Nothing that identifies a wallet's notes.** Every client asks for the
+  same blocks, so a server learns a client's IP and when it submits, and
+  never which notes are its own. `getnullifierstatus` is left out on
+  purpose: asking about a nullifier reveals the note behind it. Light
+  wallets detect spends from the nullifiers in the compact blocks.
+- **Bounded.** The body is at most 256 KiB, which fits the largest
+  transaction as hex. A batch holds at most 8 calls. A ranged call returns
+  at most 100 blocks and stops adding compact blocks after 4 MiB of hex,
+  but always returns at least one. A connection has 30 s from accept to
+  answer, and 256 connections are served at once; more are closed
+  unanswered.
+- **CORS.** `OPTIONS` preflights are answered and every response carries
+  `Access-Control-Allow-Origin: *`, so a web wallet on any origin can call
+  it. No cookies or credentials are involved.
+- **Rate limits belong to the proxy in front.** The node has no per-client
+  limit: behind a reverse proxy every request comes from the proxy's own
+  address.
+
+| Method | Params | Result |
+|---|---|---|
+| `getlightinfo` | | `network`, `genesis` (hash), `height`, `best_block_hash`, `syncing`, `coinbase_maturity`, `protocol_version`, `max_range`. Check `network` and `genesis` before scanning anything |
+| `getblockhash` | `height` | main-chain hash, as on the private endpoint |
+| `getblockhashes` | `start`, `count` (1–100) | main-chain hashes from `start`, ending early at the tip; `[]` past it. For finding where a reorg diverged from what the wallet scanned |
+| `getcompactblock` | `height` | hex compact block, as on the private endpoint |
+| `getcompactblocks` | `start`, `count` (1–100) | hex compact blocks from `start`, ending early at the tip or at the byte cap. Ask again from the next height |
+| `sendrawtransaction` | `hex` | txid; normal mempool validation |
+| `gettransactionstatus` | `txid` | as on the private endpoint |
+
+A sync step: call `getlightinfo`. Walk back from the wallet's last scanned
+height with `getblockhashes` until a hash matches, and roll back to that
+height. Then call `getcompactblocks` from the next height and apply each
+block with `wallet::scan_compact` until the tip. Each compact block carries
+its height and hash, so a reorg that happens mid-range is caught on the
+next step. Memos are not in compact blocks.
+
 ## Order of work and estimates
 
 | Phase | Content | Estimate |
@@ -417,6 +461,7 @@ design) and should be planned, not promised.
 | 2 | templates, submission, long poll, mining info | done |
 | 3 | wallet daemon, watch-only wallets, async operations | done |
 | 4 | disclosure, ownership proofs | done |
+| 5 | public light-wallet listener | done |
 
 Phases 1 and 2 give a mining pool everything it needs. Phase 3 gives an
 exchange everything it needs. Write the exchange integration guide and

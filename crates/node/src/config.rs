@@ -159,6 +159,9 @@ pub struct Config {
     pub rpc_http: Option<SocketAddr>,
     /// Token the control socket demands; generated when `None`.
     pub rpc_token: Option<Token>,
+    /// The public light-wallet listener ([`crate::light`]), or `None` for
+    /// none. No token: it serves only read-only methods and submission.
+    pub light_listen: Option<SocketAddr>,
     /// Shell command run with `%s` replaced by the hash of every new
     /// main-chain tip, or `None`. For pools that prefer a hook to long
     /// polling.
@@ -202,6 +205,7 @@ impl Config {
             rpc: None,
             rpc_http: None,
             rpc_token: None,
+            light_listen: None,
             block_notify: None,
             metrics: None,
             max_inbound: DEFAULT_MAX_INBOUND,

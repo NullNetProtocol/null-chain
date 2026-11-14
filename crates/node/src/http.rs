@@ -1,6 +1,8 @@
 //! The smallest HTTP/1.1 server the JSON-RPC, faucet and metrics
 //! endpoints need: read one request, answer one response, close.
 
+use std::fmt::Write as _;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -150,13 +152,42 @@ pub async fn respond_with(
     content_type: &str,
     body: &[u8],
 ) -> Result<()> {
-    let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).await?;
+    respond_with_headers(stream, status, content_type, &[], body).await
+}
+
+/// Writes a response with the given content type and `extra` headers,
+/// and closes.
+///
+/// # Errors
+/// Fails on a socket error.
+pub async fn respond_with_headers(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> Result<()> {
+    stream
+        .write_all(response_head(status, content_type, extra, body.len()).as_bytes())
+        .await?;
     stream.write_all(body).await?;
     Ok(())
+}
+
+/// The status line and headers of a response.
+fn response_head(
+    status: &str,
+    content_type: &str,
+    extra: &[(&str, &str)],
+    length: usize,
+) -> String {
+    let extra = extra.iter().fold(String::new(), |mut out, (name, value)| {
+        let _ = write!(out, "{name}: {value}\r\n");
+        out
+    });
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {length}\r\n{extra}Connection: close\r\n\r\n"
+    )
 }
 
 #[cfg(test)]
@@ -164,6 +195,16 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+
+    #[test]
+    fn response_heads_carry_extra_headers_before_the_blank_line() {
+        assert_eq!(
+            response_head("200 OK", "text/plain", &[], 2),
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\n"
+        );
+        let head = response_head("204 No Content", "text/plain", &[("A", "1"), ("B", "2")], 0);
+        assert!(head.contains("\r\nA: 1\r\nB: 2\r\nConnection: close\r\n\r\n"));
+    }
 
     #[test]
     fn heads_parse_into_method_path_and_lowercased_headers() {
