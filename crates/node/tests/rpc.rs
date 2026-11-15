@@ -160,12 +160,7 @@ async fn light_wallet_syncs_and_finds_the_payment(
         "{answer}"
     );
 
-    // Hashes and compact blocks in ranges agree with the single calls.
-    let hashes = ask("getblockhashes", json!([0, 3])).await["result"].clone();
-    assert_eq!(hashes[0], genesis.to_string());
-    assert_eq!(hashes[2], ask("getblockhash", json!([2])).await["result"]);
-    let past = ask("getblockhashes", json!([tip + 1, 5])).await["result"].clone();
-    assert_eq!(past, json!([]));
+    light_ranges_agree(node, genesis, tip).await;
 
     // A wallet that only ever talks to this listener sees the payment.
     let wallet = Wallet::in_memory(receiver_sk, genesis, rng).unwrap();
@@ -181,6 +176,53 @@ async fn light_wallet_syncs_and_finds_the_payment(
         }
     }
     assert_eq!(wallet.balance().unwrap(), 1_000);
+}
+
+/// One call on the light listener; returns the whole reply.
+async fn light_call(light: SocketAddr, method: &str, params: Value) -> Value {
+    let body = json!({"jsonrpc": "2.0", "method": method, "params": params, "id": 1});
+    post(light, None, &body.to_string()).await.1
+}
+
+/// Ranged light calls agree with the single ones, stop at the tip, and
+/// are one request to the node each, cut at the byte cap.
+async fn light_ranges_agree(node: &Handle, genesis: null_protocol::block::BlockHash, tip: u32) {
+    let light = node.light_addr.unwrap();
+    let ask = async |method: &str, params: Value| light_call(light, method, params).await;
+    let hashes = ask("getblockhashes", json!([0, 3])).await["result"].clone();
+    assert_eq!(hashes[0], genesis.to_string());
+    assert_eq!(hashes[2], ask("getblockhash", json!([2])).await["result"]);
+    let past = ask("getblockhashes", json!([tip + 1, 5])).await["result"].clone();
+    assert_eq!(past, json!([]));
+    let near_tip = ask("getblockhashes", json!([tip, 5])).await["result"].clone();
+    assert_eq!(near_tip.as_array().unwrap().len(), 1, "stops at the tip");
+    let compact = ask("getcompactblocks", json!([1, 2])).await["result"].clone();
+    assert_eq!(
+        compact[1],
+        ask("getcompactblock", json!([2])).await["result"]
+    );
+    let past = ask("getcompactblocks", json!([tip + 1, 5])).await["result"].clone();
+    assert_eq!(past, json!([]));
+
+    // A range is one request to the node, cut at the byte cap after at
+    // least one block.
+    let capped = node
+        .request(Request::CompactRange {
+            start: 0,
+            count: 3,
+            max_bytes: 1,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&capped, Response::CompactRange(b) if b.len() == 1),
+        "{capped:?}"
+    );
+    let hashes = node
+        .request(Request::HashRange { start: 0, count: 2 })
+        .await
+        .unwrap();
+    assert!(matches!(&hashes, Response::Hashes(h) if h.first() == Some(&genesis)));
 }
 
 async fn height(handle: &Handle) -> u32 {

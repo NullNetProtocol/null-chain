@@ -154,7 +154,8 @@ Tick an item only when it has tests and passes clippy.
 - [x] The wallet crates build for `wasm32-unknown-unknown` (Halo2 `multicore` off on wasm32 only; consumers enable `getrandom/js`) for the web wallet (2026-11-15)
 - [x] Wallets in a byte image instead of a file (`wallet::Buffer`, `Wallet::create_from_phrase_in`, `Wallet::open_in`), for the browser wallet's IndexedDB (2026-11-15)
 - [ ] CI: a wasm32 check of `null-wallet`, so the web build cannot silently break
-- [ ] Light listener: a small compact-block cache if public load ever shows up on the seeds' event loop (each block in a range is one request through the loop today)
+- [x] Light listener: a range of compact blocks or hashes is one request through the node's event loop, not one per block (100 blocks on a syncing node: 23.5 s before, 0.8 s after) (2026-11-15)
+- [ ] Light listener: a small compact-block cache if public load ever shows up on the seeds' event loop
 
 ## Phase 8: Hardening and launch
 

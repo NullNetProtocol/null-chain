@@ -301,9 +301,11 @@ pub fn format(response: &Response) -> String {
         }
         Response::Failed(reason) => format!("err {reason}"),
         Response::Stopping => "ok stopping".into(),
-        // Reachable only over JSON-RPC; the line protocol has no request
-        // that yields them.
+        // Reachable only over JSON-RPC or the light listener; the line
+        // protocol has no request that yields them.
         Response::Transaction(_)
+        | Response::CompactRange(_)
+        | Response::Hashes(_)
         | Response::Txids(_)
         | Response::Peers(_)
         | Response::BlockSubmitted(_)

@@ -20,6 +20,7 @@ use null_p2p::peer::{version_info, Direction, Event as PeerEvent, Peer, SELF_CON
 use null_p2p::sync::{locator, BlockSync};
 use null_protocol::address::Address;
 use null_protocol::block::{Block, BlockHash, BlockHeader};
+use null_protocol::bytes::Encodable;
 use null_protocol::compact::CompactBlock as LightBlock;
 use null_protocol::consensus::{next_height, MAX_BLOCK_TRANSACTIONS};
 use null_protocol::nullifier::Nullifier;
@@ -170,11 +171,30 @@ pub enum Request {
     Block(u32),
     /// A compact block by height, for light clients.
     Compact(u32),
+    /// Consecutive compact blocks from `start`, at most `count`, stopping
+    /// at the tip or once their encoding passes `max_bytes` (always at
+    /// least one block). One request, so a busy event loop serves a whole
+    /// range in one turn instead of one turn per block.
+    CompactRange {
+        /// First height.
+        start: u32,
+        /// Most blocks.
+        count: u32,
+        /// Encoded size after which no further block is added.
+        max_bytes: usize,
+    },
     /// The coinbase of the main-chain block at a height, which wallets
     /// scanning full blocks need when it matures.
     Coinbase(u32),
     /// The hash of the block at a height, for cheap reorg checks.
     Hash(u32),
+    /// Main-chain hashes from `start`, at most `count`, stopping at the tip.
+    HashRange {
+        /// First height.
+        start: u32,
+        /// Most hashes.
+        count: u32,
+    },
     /// Submit a transaction.
     Submit(Box<Transaction>),
     /// Whether a nullifier is spent.
@@ -326,10 +346,14 @@ pub enum Response {
     Block(Option<Box<Block>>),
     /// A compact block, if present.
     Compact(Option<Box<LightBlock>>),
+    /// Consecutive compact blocks, possibly none.
+    CompactRange(Vec<LightBlock>),
     /// A coinbase transaction, if its block is present.
     Coinbase(Option<Box<Transaction>>),
     /// A block hash, if present.
     Hash(Option<BlockHash>),
+    /// Consecutive main-chain hashes, possibly none.
+    Hashes(Vec<BlockHash>),
     /// The submitted transaction's id.
     Submitted(TxId),
     /// Whether a nullifier is spent.
@@ -1764,6 +1788,50 @@ impl Node {
         })
     }
 
+    /// The compact form of the main-chain block at `height`.
+    fn compact_at(&self, height: u32) -> Result<Option<LightBlock>> {
+        let Some(block) = self.block_at(height)? else {
+            return Ok(None);
+        };
+        let earlier = earlier_coinbase(self.chain.store(), &self.params, height)?;
+        let maturity = self.params.coinbase_maturity;
+        Ok(Some(LightBlock::from_block(
+            &block,
+            maturity,
+            earlier.as_ref(),
+        )?))
+    }
+
+    /// See [`Request::HashRange`].
+    fn hash_range(&self, start: u32, count: u32) -> Result<Vec<BlockHash>> {
+        let store = self.chain.store();
+        let mut hashes = Vec::new();
+        for height in start..start.saturating_add(count) {
+            let Some(hash) = store.hash_at(height)? else {
+                break;
+            };
+            hashes.push(hash);
+        }
+        Ok(hashes)
+    }
+
+    /// See [`Request::CompactRange`].
+    fn compact_range(&self, start: u32, count: u32, max_bytes: usize) -> Result<Vec<LightBlock>> {
+        let mut blocks = Vec::new();
+        let mut bytes = 0usize;
+        for height in start..start.saturating_add(count) {
+            if bytes >= max_bytes {
+                break;
+            }
+            let Some(block) = self.compact_at(height)? else {
+                break;
+            };
+            bytes = bytes.saturating_add(block.to_vec().len());
+            blocks.push(block);
+        }
+        Ok(blocks)
+    }
+
     fn template(&mut self) -> Result<Template> {
         let tip = self.chain.tip()?;
         let store = self.chain.store();
@@ -2165,14 +2233,17 @@ impl Node {
             Request::MiningInfo => Ok(Response::MiningInfo(Box::new(self.mining_info()?))),
             Request::Block(height) => Ok(Response::Block(self.block_at(height)?.map(Box::new))),
             Request::Compact(height) => {
-                let Some(block) = self.block_at(height)? else {
-                    return Ok(Response::Compact(None));
-                };
-                let store = self.chain.store();
-                let earlier = earlier_coinbase(store, &self.params, height)?;
-                let maturity = self.params.coinbase_maturity;
-                let compact = LightBlock::from_block(&block, maturity, earlier.as_ref())?;
-                Ok(Response::Compact(Some(Box::new(compact))))
+                Ok(Response::Compact(self.compact_at(height)?.map(Box::new)))
+            }
+            Request::CompactRange {
+                start,
+                count,
+                max_bytes,
+            } => Ok(Response::CompactRange(
+                self.compact_range(start, count, max_bytes)?,
+            )),
+            Request::HashRange { start, count } => {
+                Ok(Response::Hashes(self.hash_range(start, count)?))
             }
             Request::Coinbase(height) => Ok(Response::Coinbase(
                 self.block_at(height)?

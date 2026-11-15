@@ -116,41 +116,41 @@ impl Light {
         }
     }
 
-    /// Main-chain hashes from `start`, up to `count` and the tip.
+    /// Main-chain hashes from `start`, up to `count` and the tip, in one
+    /// request to the node.
     async fn hashes(&self, params: &Params) -> Result<Value, RpcError> {
-        let mut hashes = Vec::new();
-        for height in range(params)? {
-            match self.hash_at(height).await? {
-                Some(hash) => hashes.push(hash),
-                None => break,
-            }
+        let (start, count) = range(params)?;
+        match self.0.ask(Request::HashRange { start, count }).await? {
+            Response::Hashes(hashes) => Ok(json!(hashes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>())),
+            _ => Ok(json!([])),
         }
-        Ok(json!(hashes))
     }
 
     /// Compact blocks as hex from `start`, up to `count`, the tip, or
-    /// [`MAX_RANGE_BYTES`].
+    /// [`MAX_RANGE_BYTES`] of hex, in one request to the node.
     async fn compact_blocks(&self, params: &Params) -> Result<Value, RpcError> {
-        let mut blocks = Vec::new();
-        let mut bytes = 0usize;
-        for height in range(params)? {
-            if bytes >= MAX_RANGE_BYTES {
-                break;
-            }
-            let Response::Compact(Some(block)) = self.0.ask(Request::Compact(height)).await? else {
-                break;
-            };
-            let hex = to_hex(&block.to_vec());
-            bytes = bytes.saturating_add(hex.len());
-            blocks.push(hex);
+        let (start, count) = range(params)?;
+        let request = Request::CompactRange {
+            start,
+            count,
+            max_bytes: MAX_RANGE_BYTES / 2,
+        };
+        match self.0.ask(request).await? {
+            Response::CompactRange(blocks) => Ok(json!(blocks
+                .iter()
+                .map(|block| to_hex(&block.to_vec()))
+                .collect::<Vec<_>>())),
+            _ => Ok(json!([])),
         }
-        Ok(json!(blocks))
     }
 }
 
-/// The heights a ranged call asks for: `start` and `count`, with `count`
-/// between 1 and [`MAX_RANGE`].
-fn range(params: &Params) -> Result<core::ops::Range<u32>, RpcError> {
+/// The `start` and `count` of a ranged call, with `count` between 1 and
+/// [`MAX_RANGE`].
+fn range(params: &Params) -> Result<(u32, u32), RpcError> {
     let start: u32 = params.get(0, "start")?;
     let count: u32 = params.get(1, "count")?;
     if !(1..=MAX_RANGE).contains(&count) {
@@ -158,7 +158,7 @@ fn range(params: &Params) -> Result<core::ops::Range<u32>, RpcError> {
             "count must be between 1 and {MAX_RANGE}"
         )));
     }
-    Ok(start..start.saturating_add(count))
+    Ok((start, count))
 }
 
 #[cfg(test)]
@@ -186,11 +186,13 @@ mod tests {
 
     #[test]
     fn ranges_are_bounded() {
-        let ok = range(&Params::new(json!([10, MAX_RANGE]))).unwrap();
-        assert_eq!(ok, 10..10 + MAX_RANGE);
+        assert_eq!(
+            range(&Params::new(json!([10, MAX_RANGE]))).unwrap(),
+            (10, MAX_RANGE)
+        );
         assert_eq!(
             range(&Params::new(json!({ "start": 5, "count": 1 }))).unwrap(),
-            5..6
+            (5, 1)
         );
         for bad in [
             json!([0, 0]),
@@ -202,7 +204,7 @@ mod tests {
         }
         assert_eq!(
             range(&Params::new(json!([u32::MAX, 2]))).unwrap(),
-            u32::MAX..u32::MAX
+            (u32::MAX, 2)
         );
     }
 
