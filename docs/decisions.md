@@ -1591,3 +1591,23 @@ proves on one thread with no feature to remember. Threaded WASM can be
 added later if single-threaded proving is too slow. Consumers on wasm32
 enable `getrandom`'s `js` feature themselves. Proofs are identical either
 way, so consensus does not change.
+
+## 2026-11-15: Keep the frontiers a deep reorganization needs
+
+A finding of the monetary review (regression tests in
+`crates/chain/tests/monetary_review.rs`).
+
+A node pruned commitment-tree frontiers `max_reorg_depth` (200) blocks
+below its tip, but a block just above a 200-deep fork may use an anchor
+`anchor_max_age` (100) blocks older still. A reorganization deeper than
+100 blocks could then refuse a valid branch that a freshly synced node
+accepts, and a failed one could not restore the old chain, because it
+validated the old blocks again against roots it had pruned: the node
+stayed at the fork with every block already stored (`AlreadyKnown`).
+
+Chosen: keep `max_reorg_depth + anchor_max_age` blocks of frontiers, and
+restore the old chain from the trees saved while reverting it, without
+validating it again. The anchor rule still looks back `anchor_max_age`
+from the tip, so keeping more changes no rule and needs no resync; a node
+reaches the longer history 100 blocks after upgrading.
+

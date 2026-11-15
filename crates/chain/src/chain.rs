@@ -201,6 +201,12 @@ impl Chain {
 
     /// Reverts to `fork_height`, applies `branch`, and restores the old
     /// chain if any branch block is invalid.
+    ///
+    /// The old blocks are restored with the trees saved as they were
+    /// reverted, not validated again: they were valid when applied, and a
+    /// second validation could fail where the first did not (an anchor whose
+    /// root has since been pruned, say), which would leave the node at the
+    /// fork with every block it needs already stored.
     fn reorganize(
         &self,
         fork_height: u32,
@@ -208,9 +214,10 @@ impl Chain {
         now: u64,
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Result<Import> {
-        let mut reverted = Vec::new();
+        let mut old = Vec::new();
         while self.tip()?.height > fork_height {
-            reverted.push(self.store.revert()?);
+            let tree = self.store.tree()?;
+            old.push((self.store.revert()?, tree));
         }
         let validator = self.validator(now);
         let mut applied = 0u32;
@@ -219,13 +226,14 @@ impl Chain {
                 for _ in 0..applied {
                     self.store.revert()?;
                 }
-                for old in reverted.iter().rev() {
-                    validator.validate_and_apply(&self.store, old, rng)?;
+                for (block, tree) in old.iter().rev() {
+                    self.store.apply(block, tree)?;
                 }
                 return Err(error);
             }
             applied = applied.saturating_add(1);
         }
+        let reverted = old.into_iter().map(|(block, _)| block).collect();
         Ok(Import::Reorganized { reverted, applied })
     }
 }

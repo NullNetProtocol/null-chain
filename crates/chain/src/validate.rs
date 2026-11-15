@@ -90,7 +90,7 @@ impl Validator<'_> {
             return Err(Error::InvalidHeader("commitment root mismatch"));
         }
         store.apply(block, &tree)?;
-        if let Some(prune_below) = header.height.checked_sub(self.params.max_reorg_depth) {
+        if let Some(prune_below) = header.height.checked_sub(frontier_retention(self.params)) {
             store.prune_frontiers_below(prune_below)?;
         }
         Ok(tree)
@@ -248,6 +248,18 @@ impl Validator<'_> {
         }
         Ok(())
     }
+}
+
+/// How many blocks of commitment-tree frontiers below the tip a node
+/// keeps. A reorganization reverts up to `max_reorg_depth` blocks, and a
+/// branch block just above the fork may use an anchor up to
+/// `anchor_max_age` blocks older than itself, so both are needed: with
+/// only the first, a node that pruned a fork's older roots would refuse a
+/// valid deep branch that a freshly synced node accepts. Keeping more
+/// changes no rule, since anchors are still looked up only
+/// `anchor_max_age` blocks back from the tip.
+pub fn frontier_retention(params: &ChainParams) -> u32 {
+    params.max_reorg_depth.saturating_add(params.anchor_max_age)
 }
 
 /// The coinbase of an earlier main-chain block that matures at `height`,
