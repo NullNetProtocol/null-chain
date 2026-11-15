@@ -997,8 +997,15 @@ async fn fetch_hash(client: &mut impl Control, height: u32) -> Result<Option<Blo
     }
 }
 
+/// The compact block at `height` in format 2, with its coinbase spends, or
+/// in format 1 from a node too old to know `compact2`.
 async fn fetch_compact(client: &mut impl Control, height: u32) -> Result<CompactBlock> {
-    let hex = client.call(&format!("compact {height}")).await?;
+    let hex = match client.call(&format!("compact2 {height}")).await {
+        Err(Error::Argument(reason)) if reason.starts_with("unknown command") => {
+            client.call(&format!("compact {height}")).await?
+        }
+        other => other?,
+    };
     Ok(CompactBlock::from_slice(&from_hex(&hex)?)?)
 }
 
@@ -1029,6 +1036,36 @@ pub async fn fetch_block(client: &mut impl Control, height: u32) -> Result<Block
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A node from before compact block format 2: knows only `compact`.
+    struct OldNode(Vec<String>);
+
+    impl Control for OldNode {
+        fn call(&mut self, line: &str) -> impl std::future::Future<Output = Result<String>> + Send {
+            self.0.push(line.to_string());
+            let reply = if line.starts_with("compact2 ") {
+                Err(Error::Argument("unknown command compact2".into()))
+            } else {
+                let block = CompactBlock {
+                    height: 4,
+                    hash: BlockHash::ZERO,
+                    actions: vec![],
+                    coinbase_spends: vec![],
+                };
+                Ok(null_crypto::encoding::to_hex(&block.to_format_1()))
+            };
+            std::future::ready(reply)
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_blocks_fall_back_to_format_1_on_an_old_node() {
+        let mut node = OldNode(Vec::new());
+        let block = fetch_compact(&mut node, 4).await.unwrap();
+        assert_eq!(block.height, 4);
+        assert_eq!(block.coinbase_spends, []);
+        assert_eq!(node.0, ["compact2 4", "compact 4"]);
+    }
 
     #[test]
     fn in_memory_nodes_have_no_datadir_and_given_ones_are_created() {

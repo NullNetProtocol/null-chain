@@ -7,6 +7,17 @@
 //! and confirms a hit against the commitment; every commitment lets it
 //! append to its witness tree, and every nullifier lets it detect spends.
 //! The block hash and height let it track its scan position and reorgs.
+//!
+//! A coinbase's actions wait for its maturity before they enter the tree,
+//! so they appear in the block they mature in. Its spends, though, take
+//! effect in its own block: consensus cannot tell a real spend from a
+//! dummy one, so a coinbase may spend a note. [`CompactBlock::coinbase_spends`]
+//! carries those nullifiers at the block's own height.
+//!
+//! Two encodings exist. Format 1 ends after the actions and has no
+//! coinbase spends; it is what clients from before format 2 can read.
+//! Format 2 appends `LE32(n) || n * nullifier`. [`Encodable`] writes
+//! format 2 and reads either.
 
 use null_crypto::encryption::EphemeralPublicKey;
 
@@ -65,7 +76,13 @@ pub struct CompactBlock {
     /// maturing coinbase from an earlier block first, then the block's own
     /// transactions after its coinbase (see [`crate::maturity`]).
     pub actions: Vec<CompactAction>,
+    /// The nullifiers of the block's own coinbase that `actions` does not
+    /// carry, because its actions enter the tree only when it matures.
+    pub coinbase_spends: Vec<Nullifier>,
 }
+
+/// The newest compact-block encoding, see the module documentation.
+pub const COMPACT_FORMAT: u32 = 2;
 
 impl CompactBlock {
     /// Reduces a full block to its compact form on a network whose coinbase
@@ -91,16 +108,46 @@ impl CompactBlock {
                 });
             }
         }
+        let coinbase_spends = block
+            .transactions()
+            .first()
+            .map(|coinbase| {
+                coinbase
+                    .nullifiers()
+                    .filter(|nf| !actions.iter().any(|a| a.nullifier == **nf))
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Self {
             height: block.header().height,
             hash: block.hash(),
             actions,
+            coinbase_spends,
         })
     }
-}
 
-impl Encodable for CompactBlock {
-    fn write(&self, w: &mut Writer) {
+    /// Format 1 bytes, for clients from before [`COMPACT_FORMAT`] 2: the
+    /// same without [`Self::coinbase_spends`].
+    pub fn to_format_1(&self) -> Vec<u8> {
+        let mut w = Writer::default();
+        self.write_format_1(&mut w);
+        w.into_bytes()
+    }
+
+    /// The bytes of `format` (1 or [`COMPACT_FORMAT`]).
+    ///
+    /// # Errors
+    /// Returns [`Error::Malformed`] for an unknown format.
+    pub fn encode(&self, format: u32) -> Result<Vec<u8>> {
+        match format {
+            1 => Ok(self.to_format_1()),
+            COMPACT_FORMAT => Ok(self.to_vec()),
+            _ => Err(Error::Malformed("unknown compact block format")),
+        }
+    }
+
+    fn write_format_1(&self, w: &mut Writer) {
         w.put(&self.height.to_le_bytes()).put(self.hash.as_bytes());
         // A block holds at most MAX_BLOCK_TRANSACTIONS * 16 actions, which
         // fits a u32 with room to spare.
@@ -111,6 +158,21 @@ impl Encodable for CompactBlock {
         );
         for action in &self.actions {
             action.write(w);
+        }
+    }
+}
+
+impl Encodable for CompactBlock {
+    fn write(&self, w: &mut Writer) {
+        self.write_format_1(w);
+        // At most MAX_ACTIONS, the most spends one transaction has.
+        w.put(
+            &u32::try_from(self.coinbase_spends.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        for nf in &self.coinbase_spends {
+            w.put(&nf.to_bytes());
         }
     }
 
@@ -126,10 +188,22 @@ impl Encodable for CompactBlock {
         let actions = (0..count)
             .map(|_| CompactAction::read(r))
             .collect::<Result<Vec<_>>>()?;
+        // Format 1 ends here.
+        let mut coinbase_spends = Vec::new();
+        if r.remaining() > 0 {
+            let count = u32::from_le_bytes(r.take_array()?);
+            if count as usize > crate::consensus::MAX_ACTIONS {
+                return Err(Error::Malformed("too many coinbase spends"));
+            }
+            for _ in 0..count {
+                coinbase_spends.push(Nullifier::from_bytes(&r.take_array()?)?);
+            }
+        }
         Ok(Self {
             height,
             hash,
             actions,
+            coinbase_spends,
         })
     }
 }
@@ -153,6 +227,7 @@ mod tests {
             height: 5,
             hash: BlockHash::from_bytes([3; 32]),
             actions: vec![action.clone(), action],
+            coinbase_spends: vec![Nullifier::from_base(&null_crypto::pallas::Base::from(8u64))],
         };
         let mut w = Writer::with_capacity(256);
         block.write(&mut w);
@@ -161,6 +236,38 @@ mod tests {
         let decoded = CompactBlock::read(&mut r).unwrap();
         r.finish().unwrap();
         assert_eq!(decoded, block);
+        assert_eq!(block.encode(COMPACT_FORMAT).unwrap(), bytes);
+
+        // Format 1 is format 2 without the tail, and still decodes.
+        let old = block.encode(1).unwrap();
+        assert_eq!(old.len(), bytes.len() - 4 - 32);
+        assert_eq!(&bytes[..old.len()], old.as_slice());
+        let decoded = CompactBlock::from_slice(&old).unwrap();
+        assert_eq!(decoded.coinbase_spends, []);
+        assert_eq!(decoded.actions, block.actions);
+        assert!(block.encode(3).is_err());
+    }
+
+    #[test]
+    fn decoding_rejects_a_bad_coinbase_spend_tail() {
+        let block = CompactBlock {
+            height: 1,
+            hash: BlockHash::ZERO,
+            actions: vec![],
+            coinbase_spends: vec![],
+        };
+        let mut bytes = block.to_format_1();
+        bytes.extend_from_slice(&17u32.to_le_bytes());
+        assert!(
+            CompactBlock::from_slice(&bytes).is_err(),
+            "more than MAX_ACTIONS"
+        );
+        let mut short = block.to_format_1();
+        short.extend_from_slice(&1u32.to_le_bytes());
+        assert!(CompactBlock::from_slice(&short).is_err(), "truncated");
+        let mut stray = block.to_format_1();
+        stray.push(0);
+        assert!(CompactBlock::from_slice(&stray).is_err(), "a partial count");
     }
 
     #[test]

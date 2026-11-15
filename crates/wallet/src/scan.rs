@@ -224,9 +224,11 @@ pub fn scan_block(
 /// Detects owned notes in one compact block. Produces the same leaves as
 /// [`scan_block`] and the same owned notes, except that their memos are
 /// empty, since a compact block omits them. Its spent nullifiers are those
-/// of its tree-order actions: it leaves out the block's own coinbase and
-/// includes the maturing one, which differ only in coinbase dummy spends
-/// that never match a wallet note.
+/// of its tree-order actions plus [`CompactBlock::coinbase_spends`], the
+/// block's own coinbase, whose actions wait for its maturity but whose
+/// spends take effect now: a coinbase may spend a real note. A block from
+/// a format 1 server has no coinbase spends, and sees such a spend only
+/// when the coinbase matures.
 ///
 /// # Errors
 /// Fails if a detected note cannot derive its nullifier.
@@ -237,6 +239,8 @@ pub fn scan_compact_block(
 ) -> Result<BlockScan> {
     let mut scan = BlockScan::default();
     let stand_in = StandIn::new(keys)?;
+    scan.spent
+        .extend(block.coinbase_spends.iter().map(|nf| (*nf, None)));
     for action in &block.actions {
         let position =
             first_position.saturating_add(u64::try_from(scan.leaves.len()).unwrap_or(u64::MAX));

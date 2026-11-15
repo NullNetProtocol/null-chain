@@ -6,7 +6,8 @@
 //! auth <token>           -> ok | err unauthorized
 //! status                 -> ok height=<h> hash=<hex> peers=<n> mempool=<n> mined=<n> in_chain=<n> syncing=<bool>
 //! block <height>         -> ok <hex> | err not found
-//! compact <height>       -> ok <hex> | err not found
+//! compact <height>       -> ok <hex> | err not found   (compact block format 1)
+//! compact2 <height>      -> ok <hex> | err not found   (format 2, with coinbase spends)
 //! hash <height>          -> ok <hex> | err not found
 //! submit <hex tx>        -> ok <txid hex> | err <reason>
 //! txstatus <hex txid>    -> ok unknown | ok pooled | ok confirmed <height> <index>
@@ -200,7 +201,7 @@ async fn session(stream: TcpStream, events: mpsc::Sender<Event>, token: Token) {
 async fn answer(events: &mpsc::Sender<Event>, line: &str) -> String {
     match parse(line) {
         Ok(request) => match dispatch(events, request).await {
-            Ok(response) => format(&response),
+            Ok(response) => reply_to(line, &response),
             Err(error) => format!("err {error}"),
         },
         Err(error) => format!("err {error}"),
@@ -230,7 +231,7 @@ pub fn parse(line: &str) -> Result<Request> {
             .parse()
             .map(Request::Block)
             .map_err(|_| Error::Argument("height".into())),
-        "compact" => argument
+        "compact" | "compact2" => argument
             .parse()
             .map(Request::Compact)
             .map_err(|_| Error::Argument("height".into())),
@@ -262,6 +263,17 @@ pub fn parse(line: &str) -> Result<Request> {
     }
 }
 
+/// The reply line to request `line`: [`format`], except that `compact2`
+/// gets a compact block in format 2.
+fn reply_to(line: &str, response: &Response) -> String {
+    match response {
+        Response::Compact(Some(block)) if line.split_whitespace().next() == Some("compact2") => {
+            format!("ok {}", to_hex(&block.to_vec()))
+        }
+        other => format(other),
+    }
+}
+
 /// Formats one reply line.
 pub fn format(response: &Response) -> String {
     match response {
@@ -280,7 +292,8 @@ pub fn format(response: &Response) -> String {
             )
         }
         Response::Block(Some(block)) => format!("ok {}", to_hex(&block.to_vec())),
-        Response::Compact(Some(block)) => format!("ok {}", to_hex(&block.to_vec())),
+        // Format 1 unless the line asked for `compact2`, see [`answer`].
+        Response::Compact(Some(block)) => format!("ok {}", to_hex(&block.to_format_1())),
         Response::Hash(Some(hash)) => format!("ok {}", to_hex(hash.as_bytes())),
         Response::Coinbase(Some(tx)) => format!("ok {}", to_hex(&tx.to_vec())),
         Response::Block(None)
@@ -386,7 +399,7 @@ impl Control for Connection {
             Self::Remote(client) => client.call(line).await,
             Self::Embedded(events) => {
                 let response = dispatch(events, parse(line)?).await?;
-                decode_reply(&format(&response))
+                decode_reply(&reply_to(line, &response))
             }
         }
     }
@@ -690,6 +703,7 @@ mod tests {
         assert!(matches!(parse("status"), Ok(Request::Status)));
         assert!(matches!(parse("block 7"), Ok(Request::Block(7))));
         assert!(matches!(parse("compact 7"), Ok(Request::Compact(7))));
+        assert!(matches!(parse("compact2 7"), Ok(Request::Compact(7))));
         assert!(matches!(parse("coinbase 7"), Ok(Request::Coinbase(7))));
         assert!(parse("coinbase x").is_err());
         assert!(matches!(parse("hash 7"), Ok(Request::Hash(7))));
@@ -716,5 +730,25 @@ mod tests {
         assert_eq!(format(&Response::Block(None)), "err not found");
         assert_eq!(format(&Response::Spent(true)), "ok true");
         assert_eq!(format(&Response::Failed("x".into())), "err x");
+    }
+
+    #[test]
+    fn compact2_replies_in_format_2_and_compact_in_format_1() {
+        use null_protocol::compact::CompactBlock;
+        let block = CompactBlock {
+            height: 3,
+            hash: null_protocol::block::BlockHash::ZERO,
+            actions: vec![],
+            coinbase_spends: vec![Nullifier::from_bytes(&[0; 32]).unwrap()],
+        };
+        let response = Response::Compact(Some(Box::new(block.clone())));
+        let new = decode_reply(&reply_to("compact2 3", &response)).unwrap();
+        assert_eq!(from_hex(&new).unwrap(), block.to_vec());
+        let old = decode_reply(&reply_to("compact 3", &response)).unwrap();
+        assert_eq!(from_hex(&old).unwrap(), block.to_format_1());
+        assert_eq!(
+            reply_to("compact2 3", &Response::Compact(None)),
+            "err not found"
+        );
     }
 }

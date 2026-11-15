@@ -19,13 +19,15 @@ use std::time::Duration;
 
 use null_crypto::encoding::to_hex;
 use null_p2p::message::PROTOCOL_VERSION;
-use null_protocol::bytes::Encodable;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use crate::config::Network;
-use crate::jsonrpc::{serve_policy, unknown_method, Context, Dispatch, Params, Policy, RpcError};
+use crate::jsonrpc::{
+    compact_format, encode_compact, serve_policy, unknown_method, Context, Dispatch, Params,
+    Policy, RpcError,
+};
 use crate::node::{Event, Request, Response};
 
 /// Every method the light listener answers.
@@ -133,6 +135,7 @@ impl Light {
     /// [`MAX_RANGE_BYTES`] of hex, in one request to the node.
     async fn compact_blocks(&self, params: &Params) -> Result<Value, RpcError> {
         let (start, count) = range(params)?;
+        let format = compact_format(params, 2)?;
         let request = Request::CompactRange {
             start,
             count,
@@ -141,8 +144,8 @@ impl Light {
         match self.0.ask(request).await? {
             Response::CompactRange(blocks) => Ok(json!(blocks
                 .iter()
-                .map(|block| to_hex(&block.to_vec()))
-                .collect::<Vec<_>>())),
+                .map(|block| encode_compact(block, format).map(|bytes| to_hex(&bytes)))
+                .collect::<Result<Vec<_>, _>>()?)),
             _ => Ok(json!([])),
         }
     }

@@ -1611,3 +1611,22 @@ validating it again. The anchor rule still looks back `anchor_max_age`
 from the tip, so keeping more changes no rule and needs no resync; a node
 reaches the longer history 100 blocks after upgrading.
 
+## 2026-11-15: Compact blocks carry their own coinbase's spends
+
+A finding of the monetary review.
+
+Compact blocks carried a coinbase's actions, nullifiers included, only
+where it matures, on the assumption that coinbase spends are dummies.
+Consensus cannot enforce that (a dummy spend looks like any other), so a
+miner holding a note's key could spend it in a coinbase, and a compact
+scan would see that 99 blocks late. Only the note's owner can do this, so
+it misleads only their own light wallet.
+
+Alternatives: forbid it (impossible to check); a per-request nullifier
+query (reveals the note). Chosen: compact block format 2, which appends the
+block's own coinbase nullifiers. Clients from before it cannot read extra
+bytes, so format 1 stays the default and format 2 is asked for: the
+`format` parameter of `getcompactblock(s)` and the control command
+`compact2`, which `walletd --light` tries first and falls back from on an
+older node. Readers decode both formats. A wallet already marks a note
+spent only once, so seeing the nullifier again at maturity is harmless.

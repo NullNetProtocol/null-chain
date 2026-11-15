@@ -131,7 +131,7 @@ ids are `0x` hex of their 32-bit value.
 | `getrawmempool` | | txids, oldest first |
 | `getmempoolinfo` | | `size`, `capacity` |
 | `getnullifierstatus` | `nullifier` | `{spent}`. Every nullifier of every mined transaction is spent, the dummy spends of a coinbase included |
-| `getcompactblock` | `height` | hex of the compact block light clients sync on; its actions are the ones the block appends, in tree order, so a maturing coinbase appears where it matures |
+| `getcompactblock` | `height`, `format` = 1 | hex of the compact block light clients sync on; its actions are the ones the block appends, in tree order, so a maturing coinbase appears where it matures. `format` 2 appends `LE32(n) \|\| n * nullifier`, the spends of the block's own coinbase, which take effect at this height; format 1 (the default, for older clients) leaves them out |
 | `getpeerinfo` | | `[{id, addr, target, direction, ready, version, best_height, score}]` |
 | `getnetworkinfo` | | `network`, `protocol_version`, `connections`, `connections_in`, `connections_out`, `handshaking` |
 | `getconnectioncount` | | ready peers |
@@ -365,7 +365,9 @@ a distinct disk tag, still displayed as `proving`. Older records remain
 readable, but do not downgrade a wallet after this update. Upgrade a remote
 node alongside its wallet daemon: the control protocol now exposes
 `txstatus <txid>`, returning `unknown`, `pooled`, or
-`confirmed <height> <index>` after the `ok` prefix.
+`confirmed <height> <index>` after the `ok` prefix. A `--light` daemon asks
+for `compact2 <height>` (compact block format 2, with the block's own
+coinbase spends) and falls back to `compact` on a node without it.
 
 **Backup.** Stop the daemon and copy the wallet file, or restore from
 the seed phrase with `nulld create --phrase` and rescan.
@@ -440,8 +442,8 @@ default. Same JSON-RPC 2.0 envelopes and conventions as above, but:
 | `getlightinfo` | | `network`, `genesis` (hash), `height`, `best_block_hash`, `syncing`, `coinbase_maturity`, `protocol_version`, `max_range`. Check `network` and `genesis` before scanning anything |
 | `getblockhash` | `height` | main-chain hash, as on the private endpoint |
 | `getblockhashes` | `start`, `count` (1–100) | main-chain hashes from `start`, ending early at the tip; `[]` past it. For finding where a reorg diverged from what the wallet scanned |
-| `getcompactblock` | `height` | hex compact block, as on the private endpoint |
-| `getcompactblocks` | `start`, `count` (1–100) | hex compact blocks from `start`, ending early at the tip or at the byte cap. Ask again from the next height |
+| `getcompactblock` | `height`, `format` = 1 | hex compact block, as on the private endpoint |
+| `getcompactblocks` | `start`, `count` (1–100), `format` = 1 | hex compact blocks from `start`, ending early at the tip or at the byte cap. Ask again from the next height. New wallets ask for format 2 (see `getcompactblock`); a node from before it ignores the parameter and sends format 1, which format 2 readers also decode |
 | `sendrawtransaction` | `hex` | txid; normal mempool validation |
 | `gettransactionstatus` | `txid` | as on the private endpoint |
 

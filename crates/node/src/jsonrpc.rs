@@ -25,6 +25,7 @@ use null_protocol::address::Address;
 use null_protocol::amount::{COIN, MAX_MONEY};
 use null_protocol::block::{Block, BlockHash, BlockHeader, PowSolution};
 use null_protocol::bytes::Encodable;
+use null_protocol::compact::{CompactBlock, COMPACT_FORMAT};
 use null_protocol::consensus::{
     next_height, proof_len, BranchId, ACTION_CLASSES, FEE_PER_ACTION, MAX_ACTIONS,
     MAX_BLOCK_TRANSACTIONS, PREMINE,
@@ -944,13 +945,42 @@ async fn block_methods(
         }
         "getcompactblock" => {
             let height: u32 = params.get(0, "height")?;
+            let format = compact_format(params, 1)?;
             match context.ask(Request::Compact(height)).await? {
-                Response::Compact(Some(block)) => Ok(json!(to_hex(&block.to_vec()))),
+                Response::Compact(Some(block)) => {
+                    Ok(json!(to_hex(&encode_compact(&block, format)?)))
+                }
                 _ => Err(RpcError::not_found("block")),
             }
         }
         other => Err(unknown_method(other)),
     }
+}
+
+/// The compact-block `format` parameter at `index`: 1, the default for
+/// clients from before format 2, or [`COMPACT_FORMAT`].
+///
+/// # Errors
+/// Invalid params for any other value.
+pub(crate) fn compact_format(params: &Params, index: usize) -> core::result::Result<u32, RpcError> {
+    let format: u32 = params.opt(index, "format")?.unwrap_or(1);
+    if format == 1 || format == COMPACT_FORMAT {
+        Ok(format)
+    } else {
+        Err(RpcError::invalid_params(format!(
+            "format must be 1 or {COMPACT_FORMAT}"
+        )))
+    }
+}
+
+/// `block` in a format [`compact_format`] accepted.
+pub(crate) fn encode_compact(
+    block: &CompactBlock,
+    format: u32,
+) -> core::result::Result<Vec<u8>, RpcError> {
+    block
+        .encode(format)
+        .map_err(|e| RpcError::invalid_params(e.to_string()))
 }
 
 /// Every method that is not about blocks.

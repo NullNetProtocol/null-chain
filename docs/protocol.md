@@ -151,7 +151,10 @@ fetch compact blocks, which carry per action the nullifier, the note
 commitment, the ephemeral key and the leading 52 bytes of the note
 ciphertext, enough to detect notes and rebuild the commitment tree
 without the memo. Their actions are those the block appends, in tree
-order, so a maturing coinbase appears in the block it matures in. There is no locktime, expiry,
+order, so a maturing coinbase appears in the block it matures in. Format 2
+also lists the nullifiers of the block's own coinbase, whose spends take
+effect in its own block (a coinbase may spend a real note: a dummy spend
+cannot be told apart). There is no locktime, expiry,
 fee, or length prefix on the proof.
 
 ```

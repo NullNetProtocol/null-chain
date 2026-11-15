@@ -1302,6 +1302,35 @@ mod tests {
     }
 
     #[test]
+    fn a_compact_coinbase_spend_marks_the_note_spent_at_its_own_height() {
+        use null_protocol::compact::CompactBlock;
+
+        let mut rng = ChaCha20Rng::seed_from_u64(13);
+        let owner = WalletKeys::from_spending_key(sk(13)).unwrap();
+        let other = WalletKeys::from_spending_key(sk(14)).unwrap();
+        let b0 = coinbase_block(&mut rng, &owner, BlockHash::ZERO, 0, 1_000);
+        let b1 = coinbase_block(&mut rng, &other, b0.hash(), 1, 5);
+        let wallet = Wallet::in_memory(&sk(13), BlockHash::ZERO, &mut rng).unwrap();
+        wallet
+            .scan_compact(&CompactBlock::from_block(&b0, 1, None).unwrap())
+            .unwrap();
+        let note = wallet.unspent().unwrap()[0].clone();
+
+        // Block 1's coinbase spends the note; its actions are not in the
+        // tree yet, only its spends are listed.
+        let mut compact = CompactBlock::from_block(&b1, 1, None).unwrap();
+        compact.coinbase_spends.push(note.nullifier);
+        assert_eq!(
+            wallet.scan_compact(&compact).unwrap(),
+            ScanReport { found: 0, spent: 1 }
+        );
+        assert!(wallet.unspent().unwrap().is_empty());
+        assert_eq!(wallet.notes().unwrap()[0].spent_at, Some(1));
+        wallet.rollback_to(0).unwrap();
+        assert_eq!(wallet.unspent().unwrap().len(), 1, "a rollback reopens it");
+    }
+
+    #[test]
     fn in_memory_wallet_works_and_witnesses_match_the_naive_tree() {
         let mut rng = ChaCha20Rng::seed_from_u64(5);
         let wallet = Wallet::in_memory(&sk(5), BlockHash::ZERO, &mut rng).unwrap();

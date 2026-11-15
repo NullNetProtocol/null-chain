@@ -166,7 +166,7 @@ async fn light_wallet_syncs_and_finds_the_payment(
     let wallet = Wallet::in_memory(receiver_sk, genesis, rng).unwrap();
     while wallet.next_height().unwrap() <= tip {
         let start = wallet.next_height().unwrap();
-        let blocks = ask("getcompactblocks", json!([start, 100])).await["result"].clone();
+        let blocks = ask("getcompactblocks", json!([start, 100, 2])).await["result"].clone();
         let blocks = blocks.as_array().unwrap();
         assert_ne!(blocks.len(), 0, "no progress at height {start}");
         for hex in blocks {
@@ -203,6 +203,14 @@ async fn light_ranges_agree(node: &Handle, genesis: null_protocol::block::BlockH
     );
     let past = ask("getcompactblocks", json!([tip + 1, 5])).await["result"].clone();
     assert_eq!(past, json!([]));
+    let v2 = ask("getcompactblocks", json!([1, 2, 2])).await["result"].clone();
+    assert_eq!(v2[1], ask("getcompactblock", json!([2, 2])).await["result"]);
+    let decoded = CompactBlock::from_slice(&from_hex(v2[1].as_str().unwrap()).unwrap()).unwrap();
+    assert!(!decoded.coinbase_spends.is_empty(), "format 2 lists them");
+    assert_eq!(
+        ask("getcompactblocks", json!([1, 2, 9])).await["error"]["code"],
+        INVALID_PARAMS
+    );
 
     // A range is one request to the node, cut at the byte cap after at
     // least one block.
@@ -369,6 +377,16 @@ async fn json_rpc_serves_the_chain_and_accepts_transactions() {
     let compact = call(addr, t, "getcompactblock", json!([1])).await;
     let compact = CompactBlock::from_slice(&from_hex(compact.as_str().unwrap()).unwrap()).unwrap();
     assert_eq!((compact.height, compact.actions.len()), (1, 0));
+    assert!(compact.coinbase_spends.is_empty(), "format 1 by default");
+    // Format 2 adds the spends of block 1's own coinbase, at block 1.
+    let v2 = call(addr, t, "getcompactblock", json!([1, 2])).await;
+    let v2 = CompactBlock::from_slice(&from_hex(v2.as_str().unwrap()).unwrap()).unwrap();
+    let own: Vec<_> = block_1.transactions()[0].nullifiers().copied().collect();
+    assert_eq!(v2.coinbase_spends, own);
+    assert_eq!(
+        call_err(addr, t, "getcompactblock", json!([1, 3])).await,
+        INVALID_PARAMS
+    );
     let matured = call(addr, t, "getcompactblock", json!([spendable - 1])).await;
     let matured = CompactBlock::from_slice(&from_hex(matured.as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(
