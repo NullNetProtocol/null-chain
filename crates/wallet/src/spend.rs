@@ -209,6 +209,40 @@ fn plan<'a>(
     select_notes(&refs, total(payments)?, payments.len().saturating_add(1))
 }
 
+/// The most one payment to one recipient can send now, after its fee,
+/// from the notes [`quote_payments`] would consider. One transaction spends
+/// at most [`MAX_ACTIONS`] notes, and a note worth less than the fee it adds
+/// is better left out, so this can be less than the spendable balance; zero
+/// when nothing covers a fee.
+///
+/// # Errors
+/// Returns a wallet error.
+pub fn max_payment(wallet: &Wallet, excluded: &[u64], max_note_height: u32) -> Result<Amount> {
+    max_payment_from(&wallet.unspent()?, excluded, max_note_height)
+}
+
+fn max_payment_from(
+    unspent: &[OwnedNote],
+    excluded: &[u64],
+    max_note_height: u32,
+) -> Result<Amount> {
+    let mut values: Vec<u64> = unspent
+        .iter()
+        .filter(|n| !excluded.contains(&n.position) && n.height <= max_note_height)
+        .map(|n| n.note.value().raw())
+        .collect();
+    values.sort_unstable_by_key(|v| core::cmp::Reverse(*v));
+    let mut best = 0u64;
+    let mut sum = 0u64;
+    for (count, value) in values.into_iter().take(MAX_ACTIONS).enumerate() {
+        sum = sum.saturating_add(value);
+        // One recipient and the change output.
+        let fee = fee_for_actions(action_class(count.saturating_add(1), 2)?)?;
+        best = best.max(sum.saturating_sub(fee.raw()));
+    }
+    Ok(Amount::from_raw(best)?)
+}
+
 /// The fee and shape `payments` would have if built now from the
 /// wallet's unspent notes, with the same selection as [`build_payments`].
 /// Notes can arrive or be set aside before the payment is built, so this
@@ -552,6 +586,51 @@ mod tests {
         assert!(reserved_notes(&notes, &[0, 9], 1).is_err());
         assert!(reserved_notes(&notes, &[0, 0], 1).is_err());
         assert!(reserved_notes(&notes, &[0, 1], 0).is_err());
+    }
+
+    #[test]
+    fn the_maximum_payment_is_exactly_what_a_quote_accepts() {
+        let mut rng = ChaCha20Rng::seed_from_u64(3);
+        let keys = WalletKeys::from_spending_key(SpendingKey::random(&mut rng)).unwrap();
+        let fee = |actions: u64| actions * FEE_PER_ACTION;
+        let max = |notes: &[OwnedNote]| max_payment_from(notes, &[], u32::MAX).unwrap().raw();
+
+        assert_eq!(max(&[]), 0);
+        assert_eq!(
+            max(&[owned(&mut rng, &keys, 100, 0)]),
+            0,
+            "dust covers no fee"
+        );
+
+        // Six notes fit the eight-action class.
+        let six: Vec<OwnedNote> = (0..6)
+            .map(|i| owned(&mut rng, &keys, 1_000_000, i))
+            .collect();
+        assert_eq!(max(&six), 6_000_000 - fee(8));
+        let quote = quote_from(&six, &[pay(&keys, max(&six))], &[], u32::MAX).unwrap();
+        assert_eq!(quote.spends, 6);
+        assert!(quote_from(&six, &[pay(&keys, max(&six) + 1)], &[], u32::MAX).is_err());
+
+        // A third note worth less than the step to four actions is left out.
+        let mut two = six[..2].to_vec();
+        two.push(owned(&mut rng, &keys, 100, 7));
+        assert_eq!(max(&two), 2_000_000 - fee(2));
+
+        // One transaction spends at most sixteen notes.
+        let many: Vec<OwnedNote> = (0..20)
+            .map(|i| owned(&mut rng, &keys, 1_000_000, i))
+            .collect();
+        assert_eq!(max(&many), 16_000_000 - fee(16));
+        assert!(quote_from(&many, &[pay(&keys, max(&many))], &[], u32::MAX).is_ok());
+
+        // Set-aside and unconfirmed notes do not count.
+        assert_eq!(
+            max_payment_from(&six, &[0, 1, 2, 3], u32::MAX)
+                .unwrap()
+                .raw(),
+            2_000_000 - fee(2)
+        );
+        assert_eq!(max_payment_from(&six, &[], 0).unwrap().raw(), 0);
     }
 
     #[test]

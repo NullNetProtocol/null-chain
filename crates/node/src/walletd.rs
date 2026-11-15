@@ -1281,6 +1281,17 @@ impl WalletDaemon {
 
     fn balance_json(&self, min_confirmations: u64) -> core::result::Result<Value, RpcError> {
         let locked = self.0.wallet.locked_positions()?;
+        let tip = self.scanned_height()?.unwrap_or(0);
+        // As in a quote: a note at height h has tip - h + 1 confirmations.
+        let max_note_height = tip
+            .saturating_add(1)
+            .saturating_sub(u32::try_from(min_confirmations.max(1)).unwrap_or(u32::MAX));
+        let max_payment = null_wallet::spend::max_payment(
+            &self.0.wallet,
+            &self.pending_locks(None)?,
+            max_note_height,
+        )
+        .map_err(Error::from)?;
         let mut confirmed = 0u64;
         let mut pending = 0u64;
         let mut set_aside = 0u64;
@@ -1298,6 +1309,7 @@ impl WalletDaemon {
             "spendable": confirmed.to_string(),
             "locked": set_aside.to_string(),
             "pending": pending.to_string(),
+            "max_payment": max_payment.raw().to_string(),
             "total": confirmed
                 .saturating_add(set_aside)
                 .saturating_add(pending)

@@ -117,14 +117,28 @@ impl Form {
         if let Some(error) = &self.error {
             widgets::notice(ui, Tone::Danger, error);
         }
+        let spender = state
+            .wallet
+            .as_ref()
+            .is_some_and(|w| field(w, "watch_only").as_bool() != Some(true));
         let payment_effect = widgets::card(ui, |ui| {
             widgets::field_label(ui, "Recipient address", None);
             ui.add(egui::TextEdit::singleline(&mut self.recipient).desired_width(f32::INFINITY));
             widgets::field_label(ui, "Amount", Some("In NULL, up to 8 decimal places."));
+            let max = spender.then(|| max_payment(&state.balance)).flatten();
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.amount).desired_width(200.0));
                 ui.label(RichText::new("NULL").color(theme::TEXT_MUTED));
+                if widgets::secondary_button(ui, "Use max", synced && max.is_some())
+                    .on_hover_text("The whole amount one payment can send, after its network fee.")
+                    .clicked()
+                {
+                    if let Some(max) = &max {
+                        self.amount.clone_from(max);
+                    }
+                }
             });
+            widgets::caption(ui, &available(&state.balance));
             widgets::field_label(ui, "Memo", Some("Optional. Encrypted to the recipient."));
             ui.add(
                 egui::TextEdit::multiline(&mut self.memo)
@@ -139,12 +153,7 @@ impl Form {
         let consolidation_effect = widgets::card(ui, |ui| {
             widgets::card_title(ui, "Consolidate inputs");
             widgets::caption(ui, "Combine mined rewards and other small notes into larger notes at your main address. Review the total network fee before starting.");
-            let spendable = synced
-                && state
-                    .wallet
-                    .as_ref()
-                    .is_some_and(|w| field(w, "watch_only").as_bool() != Some(true));
-            widgets::secondary_button(ui, "Consolidate inputs", spendable)
+            widgets::secondary_button(ui, "Consolidate inputs", synced && spender)
                 .clicked()
                 .then(|| self.request_consolidation())
         });
@@ -273,6 +282,35 @@ impl Form {
     }
 }
 
+/// The amount "Use max" fills in: the wallet's `max_payment`, as NULL
+/// text, or `None` when nothing can be sent.
+fn max_payment(balance: &Value) -> Option<String> {
+    let raw = text(balance, "max_payment").parse::<u64>().ok()?;
+    (raw > 0).then(|| coins(balance, "max_payment"))
+}
+
+/// The line under the amount: what the wallet can spend, and when one
+/// payment cannot carry all of it, why.
+fn available(balance: &Value) -> String {
+    let units = |key| text(balance, key).parse::<u64>().ok();
+    let line = format!("Available: {} NULL", coins(balance, "spendable"));
+    match units("spendable").zip(units("max_payment")) {
+        // More than the largest fee is missing: the payment cannot spend
+        // every note. Consolidating combines them.
+        Some((spendable, max)) if spendable.saturating_sub(max) > largest_fee() => format!(
+            "{line}. One payment can send up to {} NULL; consolidate inputs to send more at once.",
+            coins(balance, "max_payment")
+        ),
+        _ => line,
+    }
+}
+
+/// The fee of the largest transaction.
+fn largest_fee() -> u64 {
+    null_protocol::consensus::fee_for_actions(null_protocol::consensus::MAX_ACTIONS)
+        .map_or(0, null_protocol::amount::Amount::raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +320,23 @@ mod tests {
             stage: Stage::Quoting(payment.clone()),
             ..Form::default()
         }
+    }
+
+    #[test]
+    fn use_max_fills_the_largest_payment_and_explains_when_it_falls_short() {
+        let balance = json!({ "spendable": "500000000", "max_payment": "499980000" });
+        assert_eq!(max_payment(&balance).as_deref(), Some("4.99980000"));
+        assert_eq!(available(&balance), "Available: 5.00000000 NULL");
+
+        let many = json!({ "spendable": "2000000000", "max_payment": "1599840000" });
+        assert!(available(&many).contains("up to 15.99840000 NULL; consolidate"));
+
+        assert_eq!(
+            max_payment(&json!({ "spendable": "100", "max_payment": "0" })),
+            None
+        );
+        assert_eq!(max_payment(&Value::Null), None);
+        assert!(available(&Value::Null).starts_with("Available: "));
     }
 
     #[test]

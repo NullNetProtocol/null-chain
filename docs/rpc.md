@@ -284,7 +284,7 @@ threshold; the network refuses reorganizations deeper than 200.
 
 | Method | Parameters | Result |
 |---|---|---|
-| `getbalance` | `min_confirmations` = 1 | `{spendable, locked, pending, total}`: spendable has enough confirmations and is not set aside; locked is set aside for pending operations; pending has too few confirmations |
+| `getbalance` | `min_confirmations` = 1 | `{spendable, locked, pending, max_payment, total}`: spendable has enough confirmations and is not set aside; locked is set aside for pending operations; pending has too few confirmations; max_payment is the most one payment to one recipient can send now, after its fee (one transaction spends at most 16 notes, so it can be less than spendable minus the fee) |
 | `listunspent` | `min_confirmations` = 1, `since_height` = 0 | unspent notes: `position`, `txid`, `height`, `confirmations`, `amount`, `address`, `address_index`, `label`, `memo` (text, `{hex}` for binary, null when empty), `spent`, `spent_at`, `spent_by`, `locked` |
 | `listreceived` | `min_confirmations` = 1, `since_height` = 0 | every note ever received, spent ones included, same fields |
 | `gettransaction` | `txid` | `{txid, height, confirmations, received: [notes], spent: [notes], net}`: our side of one transaction; `net` is received minus spent as a signed decimal string, so a withdrawal shows the fee as part of the outflow |

@@ -257,6 +257,8 @@ async fn the_wallet_daemon_serves_an_exchange() {
             .unwrap()
             >= 2_000_000_000
     );
+    let amount = |key: &str| balance[key].as_str().unwrap().parse::<u64>().unwrap();
+    assert!(amount("max_payment") > 0 && amount("max_payment") < amount("spendable"));
     let unspent = call(addr, t, "listunspent", json!([])).await;
     assert_eq!(unspent[0]["address_index"], 0);
     assert!(unspent[0]["txid"].is_string());

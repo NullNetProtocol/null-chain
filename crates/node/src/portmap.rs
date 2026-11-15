@@ -42,6 +42,10 @@ const RETRY_SECONDS: u64 = 1_800;
 const STEP_SECONDS: u64 = 30;
 /// Time a stopping node gives the router to delete the mapping.
 const REMOVE_SECONDS: u64 = 3;
+/// Failed searches logged in a row. A node behind a router without port
+/// mapping retries every [`RETRY_SECONDS`] for as long as it runs; after
+/// this many the retries go on quietly until a mapping succeeds.
+const FAILURES_LOGGED: u32 = 3;
 /// How long `UPnP` discovery waits for a router to answer.
 const SSDP_SECONDS: u64 = 5;
 /// First PCP/NAT-PMP reply timeout; doubled on each of [`PMP_RETRIES`].
@@ -419,6 +423,22 @@ struct Mapper {
     network: Network,
     events: mpsc::Sender<Event>,
     last: Option<MappingState>,
+    /// Failures logged since the last mapping, see [`FAILURES_LOGGED`].
+    failures: u32,
+}
+
+/// The log line for a failed search, or `None` once [`FAILURES_LOGGED`]
+/// failures in a row have been logged. The last one logged says so.
+fn failure_message(failures: &mut u32, reason: &str) -> Option<String> {
+    *failures = failures.saturating_add(1);
+    match (*failures).cmp(&FAILURES_LOGGED) {
+        std::cmp::Ordering::Less => Some(format!("port mapping: {reason}")),
+        std::cmp::Ordering::Equal => Some(format!(
+            "port mapping: {reason}; still retrying every {} minutes, without logging",
+            RETRY_SECONDS / 60
+        )),
+        std::cmp::Ordering::Greater => None,
+    }
 }
 
 impl Mapper {
@@ -429,17 +449,22 @@ impl Mapper {
         }
         match &state {
             MappingState::Searching => {}
-            MappingState::Mapped { protocol, external } => crate::logging::info(&format!(
-                "port mapping: {protocol} forwards {external} to port {}",
-                self.port
-            )),
+            MappingState::Mapped { protocol, external } => {
+                self.failures = 0;
+                crate::logging::info(&format!(
+                    "port mapping: {protocol} forwards {external} to port {}",
+                    self.port
+                ));
+            }
             MappingState::NotPublic { protocol, external } => crate::logging::warn(&format!(
                 "port mapping: {protocol} mapped the port, but the router's address {} \
                  is not public (carrier-grade NAT?); not announcing it",
                 external.ip()
             )),
             MappingState::Failed(reason) => {
-                crate::logging::info(&format!("port mapping: {reason}"));
+                if let Some(message) = failure_message(&mut self.failures, reason) {
+                    crate::logging::info(&message);
+                }
             }
         }
         self.last = Some(state.clone());
@@ -549,6 +574,7 @@ impl Task {
             network,
             events,
             last: None,
+            failures: 0,
         };
         Self {
             stop,
@@ -573,6 +599,24 @@ mod tests {
 
     fn socket(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn failed_searches_are_logged_three_times_in_a_row() {
+        let mut failures = 0;
+        let logged: Vec<_> = (0..6)
+            .map(|_| failure_message(&mut failures, "no router answered"))
+            .collect();
+        assert!(logged[..2]
+            .iter()
+            .all(|m| m.as_deref() == Some("port mapping: no router answered")));
+        assert!(logged[2].as_deref().unwrap().contains("without logging"));
+        assert!(logged[3..].iter().all(Option::is_none));
+        failures = 0;
+        assert!(
+            failure_message(&mut failures, "again").is_some(),
+            "a mapping resets the count"
+        );
     }
 
     #[test]
@@ -997,6 +1041,7 @@ mod tests {
             network: Network::Main,
             events,
             last: None,
+            failures: 0,
         };
         let mut held = None;
         mapper.step(&mut held).await;
