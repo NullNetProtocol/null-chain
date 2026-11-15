@@ -18,6 +18,10 @@ group.workspace = true
 thiserror.workspace = true
 rand_core.workspace = true
 
+# Parallel proving everywhere but the browser (see the workspace manifest).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+halo2_proofs = { workspace = true, features = ["multicore"] }
+
 [dev-dependencies]
 halo2_gadgets = { workspace = true, features = ["test-dependencies"] }
 rand.workspace = true

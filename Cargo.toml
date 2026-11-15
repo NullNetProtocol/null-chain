@@ -39,7 +39,9 @@ subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
 rand_core = "0.6"
 reddsa = "0.5"
-halo2_proofs = "0.3"
+# Without "multicore": null-circuit turns it on for every target but wasm32,
+# where threads need atomics the browser build does not have.
+halo2_proofs = { version = "0.3", default-features = false, features = ["batch"] }
 halo2_gadgets = "0.5"
 halo2_poseidon = "0.1"
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }

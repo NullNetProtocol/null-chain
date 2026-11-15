@@ -1574,3 +1574,20 @@ server learns a client's IP and when it submits, not its notes.
 Per-client rate limits are left to the reverse proxy, which is the only
 place that sees client addresses on a seed. Tor for wallets is later
 work.
+
+## 2026-11-15: Single-threaded proving in the browser build
+
+The web wallet runs the wallet crate as WebAssembly. Halo2's default
+`multicore` feature pulls in rayon threads, which do not build for
+`wasm32-unknown-unknown` without atomics and a cross-origin-isolated page.
+
+Alternatives: a Cargo feature on each crate from `null-wallet` down;
+threaded WASM (nightly `build-std` with atomics, COOP/COEP headers).
+
+Chosen: the workspace takes `halo2_proofs` without default features
+(`batch` only), and `null-circuit` turns `multicore` back on for every
+target except `wasm32`. Native builds prove exactly as before; the browser
+proves on one thread with no feature to remember. Threaded WASM can be
+added later if single-threaded proving is too slow. Consumers on wasm32
+enable `getrandom`'s `js` feature themselves. Proofs are identical either
+way, so consensus does not change.
