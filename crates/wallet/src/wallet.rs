@@ -50,8 +50,10 @@ use crate::tree::{
     anchor_of, retention, to_merkle_path, witness_tree, WitnessTree, CAP, CHECKPOINTS, SHARDS,
 };
 use crate::{Error, Result};
+pub use buffer::Buffer;
 use recovery::seal_phrase;
 
+mod buffer;
 mod recovery;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
@@ -315,7 +317,24 @@ impl Wallet {
         passphrase: &[u8],
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Result<Self> {
-        let db = Database::create(path)?;
+        Self::create_in_db(
+            Database::create(path)?,
+            keys,
+            phrase,
+            genesis,
+            passphrase,
+            rng,
+        )
+    }
+
+    fn create_in_db(
+        db: Database,
+        keys: WalletKeys,
+        phrase: Option<&AccountPhrase>,
+        genesis: BlockHash,
+        passphrase: &[u8],
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<Self> {
         let mut salt = [0u8; SALT_LEN];
         rng.fill_bytes(&mut salt);
         let file_key = FileKey::derive(passphrase, &salt)?;
@@ -329,7 +348,10 @@ impl Wallet {
     /// unlock the file, [`Error::WrongWallet`] if the file is for another
     /// network, or a database error.
     pub fn open(path: impl AsRef<Path>, genesis: BlockHash, passphrase: &[u8]) -> Result<Self> {
-        let db = Database::create(path)?;
+        Self::open_db(Database::create(path)?, genesis, passphrase)
+    }
+
+    fn open_db(db: Database, genesis: BlockHash, passphrase: &[u8]) -> Result<Self> {
         let (salt, sealed_sk, sealed_fvk, stored_genesis) = {
             let tx = db.begin_read()?;
             let meta = tx.open_table(META)?;

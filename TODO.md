@@ -152,6 +152,7 @@ Tick an item only when it has tests and passes clippy.
 - [x] Crash recovery tests: a failed store apply leaves no partial state; a node resumes its chain after a restart
 - [x] Public light-wallet listener for mobile and web wallets: `--light-listen <addr>`, off by default, no token; allowlist `getlightinfo`, `getblockhash(es)`, `getcompactblock(s)`, `sendrawtransaction`, `gettransactionstatus`; body, batch, range, byte, deadline and connection caps; CORS (`docs/rpc.md` Phase 5) (2026-11-14)
 - [x] The wallet crates build for `wasm32-unknown-unknown` (Halo2 `multicore` off on wasm32 only; consumers enable `getrandom/js`) for the web wallet (2026-11-15)
+- [x] Wallets in a byte image instead of a file (`wallet::Buffer`, `Wallet::create_from_phrase_in`, `Wallet::open_in`), for the browser wallet's IndexedDB (2026-11-15)
 - [ ] CI: a wasm32 check of `null-wallet`, so the web build cannot silently break
 - [ ] Light listener: a small compact-block cache if public load ever shows up on the seeds' event loop (each block in a range is one request through the loop today)
 
