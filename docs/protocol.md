@@ -59,7 +59,7 @@ The full viewing key is `(ak, nk, rivk)`. A diversifier `d` is 11 bytes,
 `d = FF1-AES256[dk](index)` for an 88-bit index; `g_d = HashToCurve
 ("null:DiversifiedBase", d)` must not be the identity; `pk_d = [ivk] g_d`.
 An address is `d || pk_d` (43 bytes), shown as bech32m with human readable
-part `coin` on the main network and `tcoin` on test networks; the bytes
+part `null` on the main network and `tnull` on test networks; the bytes
 are the same, and a decoder refuses the other network's prefix.
 
 Hierarchical derivation, hardened only: master `I = BLAKE2b-512
