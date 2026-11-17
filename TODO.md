@@ -114,8 +114,8 @@ Tick an item only when it has tests and passes clippy.
 - [x] Persistent address book: `peers.dat` in the data directory (canonical `Snapshot` encoding, garbage rejected, entries re-checked against gossip rules and the network policy on load, verification times kept, never trusted from the future), saved every ten minutes and on shutdown, atomically and owner-only; not kept behind a proxy or I2P (2026-10-22)
 - [x] Automatic port mapping (`--port-mapping`, desktop default): PCP, then NAT-PMP, then UPnP IGD; renewed at half the lease, removed on shutdown, bounded per step; a public mapped endpoint is announced like `advertise`, at once to ready peers; a non-public router address (carrier-grade NAT) is reported and not announced; IPv4 only (2026-11-08)
 - [x] Reachability evidence: the time of the last inbound handshake from a public address, plus listener, announced endpoint and port mapping state, in `getnetworkinfo` (2026-11-08)
-- [x] Deep reorganizations: frontiers kept for `max_reorg_depth + anchor_max_age` blocks, and a failed reorganization restores the old chain from saved trees instead of validating it again (2026-11-15)
-- [x] Compact block format 2: the spends of a block's own coinbase at its own height (`format` on `getcompactblock(s)`, control `compact2`); format 1 stays the default for older clients (2026-11-15)
+- [x] Deep reorganizations: frontiers kept for `max_reorg_depth + anchor_max_age` blocks, and a failed reorganization restores the old chain from saved trees instead of validating it again (2026-11-15; release 0.1.13)
+- [x] Compact block format 2: the spends of a block's own coinbase at its own height (`format` on `getcompactblock(s)`, control `compact2`); format 1 stays the default for older clients (2026-11-15; release 0.1.13)
 - [ ] Port mapping for IPv6 (PCP firewall pinholes) if IPv6-only home connections turn out to need it
 - [ ] Persist bans and failure back-off with the address book if restarts turn out to forgive misbehaving peers too quickly
 - [ ] Cache `GetAddr` replies per period (as Bitcoin does) so reconnecting peers cannot diff samples to infer current outbound peers
